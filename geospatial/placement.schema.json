@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorldForge placement v1 (core)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "assetId", "name", "sourceAddress", "location", "transform", "models"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "assetId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
+    "name": {"type": "string", "pattern": "\\S"},
+    "sourceAddress": {"type": "string", "pattern": "\\S"},
+    "location": {
+      "type": "object", "additionalProperties": false,
+      "required": ["latitude", "longitude", "elevationMeters"],
+      "properties": {
+        "latitude": {"type": "number", "minimum": -90, "maximum": 90},
+        "longitude": {"type": "number", "minimum": -180, "maximum": 180},
+        "elevationMeters": {"type": "number"}
+      }
+    },
+    "transform": {
+      "type": "object", "additionalProperties": false,
+      "required": ["headingDegrees", "metersPerModelUnit", "verticalOffsetMeters", "anchor", "upAxis"],
+      "properties": {
+        "headingDegrees": {"type": "number", "minimum": 0, "exclusiveMaximum": 360},
+        "metersPerModelUnit": {"type": "number", "exclusiveMinimum": 0},
+        "verticalOffsetMeters": {"type": "number"},
+        "anchor": {"const": "ground-center"},
+        "upAxis": {"const": "Y"}
+      }
+    },
+    "models": {
+      "type": "object", "additionalProperties": false,
+      "required": ["high"],
+      "properties": {
+        "high": {"const": "building.glb"},
+        "low": {"const": "building-lod.glb"}
+      }
+    }
+  }
+}
