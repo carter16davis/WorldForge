@@ -59,6 +59,18 @@ MIN_GROUND_INLIERS = 0.05
 # that kerbs, steps and scanner noise around the base do not inflate it.
 FOOTPRINT_LIFT_FRACTION = 0.10
 
+# A connected body must hold at least this share of the scan's surface area
+# before it can be called "the building". Face count cannot do this job: a
+# photogrammetric sidewalk is thousands of tiny triangles and a building wall is
+# a handful of large ones. Area is also what rejects the specks that would
+# otherwise win on height alone.
+MIN_BODY_AREA_SHARE = 0.02
+
+# A kept body holding less than this share of the scan is reported at reduced
+# confidence: the scan was shredded rather than cleanly multi-body, so what was
+# kept is a piece of the building rather than the building.
+WHOLE_BODY_AREA_SHARE = 0.25
+
 ENU_TO_GLTF = np.array([
     [1.0, 0.0, 0.0, 0.0],   # east  -> +X
     [0.0, 0.0, 1.0, 0.0],   # up    -> +Y
@@ -146,19 +158,30 @@ def isolate_building(mesh: trimesh.Trimesh, up: int,
     """Keep the tallest connected body; drop sidewalk slabs, cars and stray islands.
 
     A reconstruction region in RealityScan crops a *box*, not a subject. What is
-    left inside it still contains whatever shared that box. The building is
-    reliably the connected component with the greatest vertical extent above the
-    ground plane, which is a much safer discriminator than volume: a wide, flat
-    road surface can easily out-volume a narrow building.
+    left inside it still contains whatever shared that box. Among bodies large
+    enough to be a building, the one reaching highest above the ground plane is
+    a much safer discriminator than volume: a wide, flat road surface can easily
+    out-volume a narrow building. The size floor is what makes height usable at
+    all; see MIN_BODY_AREA_SHARE.
 
     Returns the mesh and the step describing what happened, including the case
     where splitting could not run at all. Quietly returning the whole scan there
     would hand back the sidewalk and the car inside something labelled
     "isolated", which is worse than saying it did not work.
+
+    The components are chosen from face indices and only the winner is ever
+    built into a mesh. `mesh.split()` would build all of them, and building one
+    copies the visuals with it: a RealityScan export carries a single 8192x8192
+    atlas, so each body costs 256 MB of texture whether it is the building or a
+    three-triangle speck of scanner noise. A real scan splits into hundreds of
+    bodies, which is hundreds of gigabytes of texture copies for a mesh whose
+    geometry fits in a few hundred megabytes. Under WSL that does not raise
+    MemoryError, it takes the virtual machine down with it.
     """
     before = len(mesh.vertices)
     try:
-        bodies = mesh.split(only_watertight=False)
+        components = trimesh.graph.connected_components(
+            edges=mesh.face_adjacency, nodes=np.arange(len(mesh.faces)), min_len=1)
     except Exception as exc:
         return mesh, Step(
             "isolation", False, 1.0, "unavailable", 0.0,
@@ -167,16 +190,47 @@ def isolate_building(mesh: trimesh.Trimesh, up: int,
             f"reconstruction region is still in it. Install scipy.",
         )
 
-    if len(bodies) <= 1:
+    if len(components) <= 1:
         return mesh, Step("isolation", True, 1.0, "largest-vertical-body", 0.6,
                           "Scan was a single connected body; nothing removed.")
 
-    kept = max(bodies, key=lambda body: float(body.vertices[:, up].max() - ground))
+    # Only bodies substantial enough to *be* a building may win. Height alone is
+    # not a discriminator on a real scan: a stray speck of noise sitting above
+    # the roof outranks the roof by a hair, and would be handed back as the
+    # isolated building.
+    area = mesh.area_faces
+    total = float(area.sum())
+    shares = [float(area[c].sum()) / total if total > 0 else 0.0 for c in components]
+    candidates = [(c, s) for c, s in zip(components, shares)
+                  if s >= MIN_BODY_AREA_SHARE]
+    if not candidates:
+        # Every piece is below the floor. The largest is still a better answer
+        # than the whole scan, but it is a piece, and the confidence says so.
+        candidates = [max(zip(components, shares), key=lambda pair: pair[1])]
+
+    heights = mesh.vertices[:, up]
+    tallest, share = max(
+        candidates, key=lambda pair: float(heights[mesh.faces[pair[0]]].max() - ground))
+    kept = mesh.submesh([tallest], append=True)
     after = len(kept.vertices)
-    return kept, Step("isolation", True, round(after / before, 4),
-                      "largest-vertical-body", 0.6,
-                      f"Kept {after} of {before} vertices as the building body, "
-                      f"discarding {len(bodies) - 1} other connected bodies.")
+
+    if share >= WHOLE_BODY_AREA_SHARE:
+        return kept, Step("isolation", True, round(after / before, 4),
+                          "largest-vertical-body", 0.6,
+                          f"Kept {after} of {before} vertices as the building body, "
+                          f"discarding {len(components) - 1} other connected bodies.")
+    # A scan in hundreds of pieces has no body that is the whole building. Say
+    # that, rather than labelling a fragment "isolated" and letting the scale and
+    # heading solved from its footprint look like measurements of the building.
+    return kept, Step(
+        "isolation", True, round(after / before, 4), "largest-vertical-body", 0.2,
+        f"Kept {after} of {before} vertices, but the scan is in "
+        f"{len(components)} disconnected pieces and this body is only "
+        f"{share * 100:.0f}% of its surface, so it is a fragment of the building "
+        f"rather than the whole. Expect footprint, scale and heading to need "
+        f"correction in the placement editor; recapture with more overlap, or "
+        f"place the reconstruction region by hand with the prepare/build commands.",
+    )
 
 
 # ---------------------------------------------------------------------------

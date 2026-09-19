@@ -335,3 +335,48 @@ def test_repo_demo_asset_round_trips_through_anchor(tmp_path):
     assert transform["metersPerModelUnit"] == pytest.approx(1.0, rel=0.02)
     assert _angle_gap(transform["headingDegrees"], 0.0) < 2.0
     assert 0 <= transform["headingDegrees"] < 360     # never 360.0
+
+
+def test_isolation_does_not_copy_the_texture_once_per_body():
+    """A scan splits into hundreds of bodies and carries one large texture atlas.
+
+    `trimesh`'s own `mesh.split()` builds every body, and building one copies the
+    visuals with it — so a 649-body RealityScan export with an 8192x8192 atlas
+    asks for 162 GB of texture copies. Under WSL that does not raise
+    MemoryError; it takes the virtual machine down, which is how this was found.
+    Isolation must pick from face indices and build only the body it keeps.
+    """
+    from PIL import Image
+
+    bodies = [trimesh.creation.box(extents=[1.0, 1.0, 1.0 + i / 10.0])
+              for i in range(40)]
+    for i, body in enumerate(bodies):
+        body.apply_translation([i * 3.0, 0.0, 0.0])
+    mesh = trimesh.util.concatenate(bodies)
+    # A PBR material holding a baseColorTexture, which is what loading a
+    # RealityScan GLB produces and what makes a per-body copy expensive.
+    mesh.visual = trimesh.visual.TextureVisuals(
+        uv=np.zeros((len(mesh.vertices), 2)),
+        material=trimesh.visual.material.PBRMaterial(
+            baseColorTexture=Image.new("RGB", (64, 64))),
+    )
+
+    copies = 0
+    original = Image.Image.copy
+
+    def counting_copy(self):
+        nonlocal copies
+        copies += 1
+        return original(self)
+
+    Image.Image.copy = counting_copy
+    try:
+        kept, step = anchor.isolate_building(mesh, 2, 0.0)
+    finally:
+        Image.Image.copy = original
+
+    assert step.solved
+    # One copy for the body that is kept. Anything proportional to the body
+    # count is the bug back again.
+    assert copies <= 1, f"texture copied {copies} times for {len(bodies)} bodies"
+    assert len(kept.faces) < len(mesh.faces)
