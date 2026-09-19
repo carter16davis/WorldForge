@@ -291,3 +291,47 @@ def _write(mesh: trimesh.Trimesh) -> str:
 
 def _angle_gap(a: float, b: float) -> float:
     return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def test_footprint_file_accepts_both_shapes(tmp_path):
+    """The project's own footprint files are {"outer": [...]}, so the one command
+    that wants a footprint has to read the one file in the repo that has one."""
+    from reconstruction.pipeline import read_footprint
+
+    ring = [[40.1, -74.1], [40.2, -74.1], [40.2, -74.2]]
+
+    bare = tmp_path / "bare.json"
+    bare.write_text(json.dumps(ring))
+    wrapped = tmp_path / "wrapped.json"
+    wrapped.write_text(json.dumps({"name": "X", "outer": ring, "holes": [], "source": "OSM"}))
+
+    assert read_footprint(bare) == read_footprint(wrapped) == [(40.1, -74.1), (40.2, -74.1), (40.2, -74.2)]
+
+    for bad in ([[1, 2]], {"outer": "nope"}, [[1, 2, 3], [4, 5, 6], [7, 8, 9]]):
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps(bad))
+        with pytest.raises(ValueError):
+            read_footprint(path)
+
+
+def test_repo_demo_asset_round_trips_through_anchor(tmp_path):
+    """The prepared GLB is already metres, Y-up and ground-centred, so anchoring
+    it against its own OSM footprint must return scale 1 and heading 0 — an
+    end-to-end check against real repository data, not a synthetic box."""
+    from pathlib import Path
+
+    from app.demo_data import ensure_demo_asset
+    from reconstruction.pipeline import read_footprint
+
+    placement = ensure_demo_asset()
+    model = Path("web/assets") / placement.assetId / "building.glb"
+    result = anchor.anchor_model(
+        model, placement.location.latitude, placement.location.longitude,
+        asset_id=placement.assetId,
+        osm_footprint=read_footprint("app/data/metlife_footprint.json"),
+        out_dir=tmp_path / "anchored",
+    )
+    transform = result["placement"]["transform"]
+    assert transform["metersPerModelUnit"] == pytest.approx(1.0, rel=0.02)
+    assert _angle_gap(transform["headingDegrees"], 0.0) < 2.0
+    assert 0 <= transform["headingDegrees"] < 360     # never 360.0

@@ -340,14 +340,27 @@ def package(model, thumbnail, report, output, asset_id, bounds):
     })
 
 
+def read_footprint(path):
+    """Accept either a bare [[lat, lon], ...] list or an object with an "outer" ring.
+
+    The project's own footprint files (app/data/*.json) use the second shape, so
+    the one command that wants a footprint has to read the one file that has one.
+    """
+    document = json.loads(Path(path).read_text(encoding='utf-8'))
+    ring = document.get('outer') if isinstance(document, dict) else document
+    if not isinstance(ring, list) or len(ring) < 3:
+        raise ValueError('Footprint must be at least three [latitude, longitude] pairs.')
+    try:
+        return [(float(lat), float(lon)) for lat, lon in ring]
+    except (TypeError, ValueError) as error:
+        raise ValueError(f'Footprint must be [latitude, longitude] pairs: {error}') from error
+
+
 def anchor_scan(args):
     """Georeference a scan and write the anchored GLB plus its report."""
     from . import anchor as anchoring
 
-    footprint = None
-    if args.footprint:
-        footprint = [(float(a), float(b))
-                     for a, b in json.loads(Path(args.footprint).read_text())]
+    footprint = read_footprint(args.footprint) if args.footprint else None
     result = anchoring.anchor_model(
         args.model, args.latitude, args.longitude,
         asset_id=args.asset_id, name=args.name, address=args.address,

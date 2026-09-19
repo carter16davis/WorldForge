@@ -290,6 +290,9 @@ def solve_scale_and_heading(mesh_enu: Polygon, osm_enu: Polygon,
         scored.append((_iou(placed, osm_centred), candidate % 360.0))
     scored.sort(reverse=True)
     (best_iou, heading), (second_iou, _) = scored
+    # Round before wrapping: 359.9999 rounds to 360.0, which is outside the
+    # [0, 360) the contract requires and reads as a different answer than 0.
+    heading = round(heading, 3) % 360.0
 
     # Overlap is what makes this a measurement rather than a coin flip. A
     # near-symmetric building genuinely cannot be disambiguated from footprint
@@ -313,13 +316,13 @@ def solve_scale_and_heading(mesh_enu: Polygon, osm_enu: Polygon,
                     f"differs by {aspect_error:.3f}."))
 
     if decisiveness < 0.05:
-        report.add(Step("heading", True, round(heading, 3), "footprint-match", 0.25,
+        report.add(Step("heading", True, heading, "footprint-match", 0.25,
                         f"Footprint is close to symmetric: the two opposite "
                         f"orientations score {best_iou:.2f} and {second_iou:.2f}. "
                         f"The 180-degree flip is unresolved — check a known facade "
                         f"in the placement editor."))
     else:
-        report.add(Step("heading", True, round(heading, 3), "footprint-match",
+        report.add(Step("heading", True, heading, "footprint-match",
                         round(min(0.9, best_iou + decisiveness), 3),
                         f"Overlap {best_iou:.2f} against {second_iou:.2f} for the "
                         f"opposite orientation."))
