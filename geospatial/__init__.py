@@ -1,16 +1,35 @@
-"""WorldForge placement contract and portable export helpers."""
+"""WorldForge coordinate conventions: anchors, up axes, heading and metric scale.
 
-from .placement import build_placement, geocode_prepared, local_to_enu, validate_transform
-from .export import export_package
+Pure Python, no third-party dependencies, and no imports from `app`. The app
+layer depends on this module; this module depends on nothing, so the conventions
+can be read, tested and cited without starting a web server.
 
-__all__ = ["build_placement", "geocode_prepared", "local_to_enu", "validate_transform", "export_package"]
+Geocoding lives in `app.geocode` and packaging in `app.export`. Both used to
+have a second implementation here; one of each is the point.
+"""
 
+from .placement import (
+    ANCHORS,
+    UP_AXES,
+    build_placement,
+    enu_offset,
+    latlon_from_enu,
+    local_to_enu,
+    meters_per_degree,
+    model_to_local_enu,
+    number,
+    validate_transform,
+)
 
-def geocode(address, *, allow_network=True):
-    from .integration import geocode as resolve
-    return resolve(address, allow_network=allow_network)
-
-
-def package(*args, **kwargs):
-    from .integration import package as write
-    return write(*args, **kwargs)
+__all__ = [
+    "ANCHORS",
+    "UP_AXES",
+    "build_placement",
+    "enu_offset",
+    "latlon_from_enu",
+    "local_to_enu",
+    "meters_per_degree",
+    "model_to_local_enu",
+    "number",
+    "validate_transform",
+]

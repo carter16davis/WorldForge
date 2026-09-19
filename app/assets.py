@@ -1,11 +1,9 @@
 """Builds the prepared demo asset: footprint -> GLB + placement + provenance.
 
-Person 1 owns real reconstruction. This module exists for two reasons:
-
-1. Phase 1 of AGENTS.md asks Person 3 to get *some* GLB into the viewer.
-2. AGENTS.md is emphatic that the live demo must not depend on a cloud job
-   finishing during judging. This path is deterministic, offline, and takes
-   about a second, so there is always something to show.
+`reconstruction/` builds real assets from photographs. This module exists
+because AGENTS.md is emphatic that the live demo must not depend on a cloud job
+finishing during judging: this path is deterministic, offline, and takes about a
+second, so there is always something on screen.
 
 Geometry is extruded from a real OSM footprint, so the demo asset is derived
 from measured data rather than invented — the provenance file says exactly that.
@@ -14,7 +12,6 @@ from measured data rather than invented — the provenance file says exactly tha
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,25 +22,11 @@ from shapely.geometry import Polygon
 
 from app import geohash
 from app.contracts import Placement, normalize_placement
+from geospatial import meters_per_degree
 
 REPO = Path(__file__).resolve().parent.parent
 ASSET_DIR = REPO / "web" / "assets"
 DATA_DIR = REPO / "app" / "data"
-
-
-def meters_per_degree(lat_deg: float) -> tuple[float, float]:
-    """Metres per degree of latitude and longitude at this latitude.
-
-    Same series Person 1 uses in `procedura_core.meters_per_degree`; kept
-    duplicated rather than imported so the viewer does not hard-depend on a
-    module that is still moving.
-    """
-    phi = math.radians(lat_deg)
-    m_lat = (111132.92 - 559.82 * math.cos(2 * phi)
-             + 1.175 * math.cos(4 * phi) - 0.0023 * math.cos(6 * phi))
-    m_lon = (111412.84 * math.cos(phi) - 93.5 * math.cos(3 * phi)
-             + 0.118 * math.cos(5 * phi))
-    return m_lat, m_lon
 
 
 def to_enu(points: list[tuple[float, float]], origin: tuple[float, float]) -> np.ndarray:
@@ -78,8 +61,9 @@ ENU_TO_GLTF = np.array([
 ])
 """ENU (X east, Y north, Z up) -> glTF (X right, Y up, -Z forward/north).
 
-Every consumer of `building.glb` gets Y-up metres with north at -Z. Person 1's
-OBJ exporter writes raw ENU (+Z up); `import_mesh` applies this on the way in.
+Every consumer of `building.glb` gets Y-up metres with north at -Z.
+Photogrammetry and GIS tools emit raw ENU (+Z up); `import_mesh` applies this on
+the way in, and `reconstruction.anchor` bakes it into the asset it writes.
 """
 
 
@@ -138,7 +122,7 @@ def write_glb(mesh: trimesh.Trimesh, path: Path, colour: str = "#8d6551") -> Pat
 
 
 def import_mesh(path: Path, up_axis: str = "Y") -> trimesh.Trimesh:
-    """Load a teammate's OBJ/GLB/PLY and return it in the viewer's Y-up frame."""
+    """Load an OBJ/GLB/PLY and return it in the viewer's Y-up frame."""
     loaded = trimesh.load(path, force="mesh")
     if up_axis.upper() == "Z":
         loaded.apply_transform(ENU_TO_GLTF)

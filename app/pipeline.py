@@ -1,17 +1,16 @@
-"""Integration seam between the viewer and my teammates' modules.
+"""The seam between the viewer and the reconstruction pipeline.
 
-Person 1 (reconstruction) and Person 2 (geospatial) are building in parallel.
-Rather than wait, every call the UI makes goes through here, and here decides:
+Geocoding (`app.geocode`) and packaging (`app.export`) are always present, so
+they are called directly. Reconstruction is not: it drives RealityScan, a
+Windows desktop application, and on a machine without it the app must still run
+the whole prepared path end to end. So reconstruction alone is probed at call
+time, and `capabilities()` reports honestly whether it answered.
 
-    teammate's module if importable  ->  use it
-    otherwise                        ->  a local stand-in, clearly labelled
+The UI shows that report in a status strip. Nobody has to ask "is the real
+pipeline wired up yet?" — the app says so on screen, and says which of the two
+things you are looking at: a measured reconstruction, or a prepared asset.
 
-`capabilities()` reports which branch each call took, and the UI shows that in
-a status strip. Nobody has to ask "is the real pipeline wired up yet?" — the
-app says so on screen.
-
-To wire a module in, expose any of the documented function names in
-docs/INTEGRATION.md. Nothing here needs editing.
+Contract for the reconstruction module: see docs/INTEGRATION.md.
 """
 
 from __future__ import annotations
@@ -37,8 +36,7 @@ from app.contracts import (
 log = logging.getLogger("worldforge.pipeline")
 
 # Import candidates, best first. Names match docs/INTEGRATION.md.
-RECONSTRUCTION_MODULES = ("worldforge.reconstruction", "reconstruction", "procedura_core")
-GEOSPATIAL_MODULES = ("worldforge.geospatial", "geospatial", "placement_module")
+RECONSTRUCTION_MODULES = ("reconstruction",)
 
 
 def _first_module(names: tuple[str, ...]):
@@ -70,38 +68,31 @@ class Capability:
                 "provider": self.provider, "detail": self.detail}
 
 
-def _modules():
-    recon, recon_name = _first_module(RECONSTRUCTION_MODULES)
-    geo, geo_name = _first_module(GEOSPATIAL_MODULES)
-    return recon, recon_name, geo, geo_name
+def _reconstruction():
+    """The reconstruction module, if this machine has a working one."""
+    return _first_module(RECONSTRUCTION_MODULES)
 
 
 def capabilities() -> list[dict]:
-    """What is actually wired right now. Re-checked on every call so a teammate
-    dropping a module into the repo shows up on a page refresh."""
-    recon, recon_name, geo, geo_name = _modules()
-    recon_fn = _attr(recon, "reconstruct", "build_asset", "build")
-    cov_fn = _attr(recon, "coverage_report", "analyze_coverage", "assess")
-    geo_fn = _attr(geo, "geocode", "resolve_address")
-    pack_fn = _attr(geo, "package", "export_package", "write_package")
+    """What is actually wired right now. Re-checked on every call, so installing
+    RealityScan and restarting shows up on a page refresh."""
+    recon, name = _reconstruction()
+    recon_fn = _attr(recon, "reconstruct", "build_asset")
+    cov_fn = _attr(recon, "coverage_report", "analyze_coverage")
 
     return [
         Capability("Reconstruction", bool(recon_fn),
-                   recon_name or "prepared asset",
-                   "Person 1's pipeline" if recon_fn
+                   name if recon_fn else "prepared asset",
+                   "RealityScan photogrammetry, anchored to the geocoded address." if recon_fn
                    else "Using the prepared venue asset — uploads are analysed but not reconstructed.").as_dict(),
         Capability("Coverage agent", bool(cov_fn),
-                   recon_name or "built-in",
-                   "Person 1's coverage agent" if cov_fn
+                   name if cov_fn else "built-in",
+                   "Per-facade coverage from the reconstruction's own camera poses." if cov_fn
                    else "Built-in intake checks (EXIF, blur, duplicates) plus the prepared report.").as_dict(),
-        Capability("Geocoding", bool(geo_fn),
-                   geo_name or "nominatim + venue table",
-                   "Person 2's geocoder" if geo_fn
-                   else "OpenStreetMap Nominatim, falling back to the offline venue table.").as_dict(),
-        Capability("Export packaging", bool(pack_fn),
-                   geo_name or "built-in",
-                   "Person 2's packager" if pack_fn
-                   else "Built-in packager writing the AGENTS.md export contract.").as_dict(),
+        Capability("Geocoding", True, "nominatim + venue table",
+                   "Prepared venue table first, then OpenStreetMap Nominatim.").as_dict(),
+        Capability("Export packaging", True, "built-in",
+                   "Immutable snapshot packages written to the AGENTS.md export contract.").as_dict(),
     ]
 
 
@@ -110,41 +101,7 @@ def capabilities() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def geocode_address(address: str, *, allow_network: bool = True) -> dict:
-    _, _, geo, name = _modules()
-    fn = _attr(geo, "geocode", "resolve_address")
-    if fn:
-        try:
-            result = fn(address, allow_network=allow_network)
-            return _coerce_geocode(result, provider=name)
-        except Exception as exc:
-            log.warning("%s.geocode failed (%s); falling back", name, exc)
     return _geocode.geocode(address, allow_network=allow_network).as_dict()
-
-
-def _coerce_geocode(result: Any, provider: str) -> dict:
-    """Accept whatever Person 2 returns — dataclass, dict, or (lat, lon)."""
-    if isinstance(result, tuple) and len(result) == 2:
-        lat, lon = float(result[0]), float(result[1])
-        payload = {"latitude": lat, "longitude": lon, "displayName": "",
-                   "confidence": 0.8, "note": ""}
-    elif isinstance(result, dict):
-        payload = dict(result)
-        payload["latitude"] = float(payload.get("latitude", payload.get("lat", 0.0)))
-        payload["longitude"] = float(payload.get("longitude", payload.get("lon", 0.0)))
-    else:
-        payload = {
-            "latitude": float(getattr(result, "latitude", getattr(result, "lat", 0.0))),
-            "longitude": float(getattr(result, "longitude", getattr(result, "lon", 0.0))),
-            "displayName": getattr(result, "displayName", getattr(result, "display_name", "")),
-            "confidence": float(getattr(result, "confidence", 0.8)),
-            "note": getattr(result, "note", ""),
-        }
-    payload.setdefault("displayName", "")
-    payload.setdefault("confidence", 0.8)
-    payload.setdefault("note", "")
-    payload.setdefault("source", provider)
-    payload["cell"] = geohash.encode(payload["latitude"], payload["longitude"], 8)
-    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +157,7 @@ def apply_transform(placement: Placement, transform: dict) -> Placement:
 # ---------------------------------------------------------------------------
 
 def coverage_for(placement: Placement, fallback: dict) -> dict:
-    recon, name, _, _ = _modules()
+    recon, name = _reconstruction()
     fn = _attr(recon, "coverage_report", "analyze_coverage", "assess")
     if fn:
         try:
@@ -213,9 +170,9 @@ def coverage_for(placement: Placement, fallback: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Media intake
 #
-# Person 1 owns reconstruction. This is the intake half: enough analysis that
-# the upload screen tells the truth about the files, and a clean hand-off point
-# when the real pipeline arrives.
+# The intake half of reconstruction: enough analysis that the upload screen
+# tells the truth about the files, and a clean hand-off point into the real
+# pipeline when this machine can run one.
 # ---------------------------------------------------------------------------
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".tif", ".tiff"}
@@ -240,15 +197,29 @@ def _exif_gps(img) -> tuple[float, float] | None:
 
 
 def _blur_score(path: Path) -> float | None:
-    """Variance of the Laplacian: low means soft or out of focus."""
+    """Variance of the Laplacian: low means soft or out of focus.
+
+    Computed with numpy rather than OpenCV. This used to `import cv2`, which is
+    not a project dependency, so every score came back None and the upload screen
+    silently never flagged a blurry photo. The same four-neighbour kernel as
+    `reconstruction.pipeline.image_quality`, so the web app and the CLI agree
+    about which frames are worth reconstructing.
+    """
     try:
-        import cv2
         import numpy as np
-        data = np.frombuffer(path.read_bytes(), dtype=np.uint8)
-        img = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
-        if img is None:
+        from PIL import Image, ImageOps
+
+        with Image.open(path) as original:
+            original.load()
+            grey = ImageOps.exif_transpose(original).convert("L")
+            grey.thumbnail((1024, 1024))
+            pixels = np.asarray(grey, dtype=np.float64)
+        if min(pixels.shape) < 3:
             return None
-        return float(cv2.Laplacian(img, cv2.CV_64F).var())
+        centre = pixels[1:-1, 1:-1]
+        laplacian = (pixels[:-2, 1:-1] + pixels[2:, 1:-1]
+                     + pixels[1:-1, :-2] + pixels[1:-1, 2:] - 4 * centre)
+        return float(laplacian.var())
     except Exception:
         return None
 
@@ -274,7 +245,7 @@ def _hamming(a: str, b: str) -> int:
 def analyse_media(paths: list[Path], *, blur_threshold: float = 80.0) -> dict:
     """Per-file intake report. Never raises — an unreadable file becomes a
     flagged row, not a failed upload."""
-    recon, name, _, _ = _modules()
+    recon, name = _reconstruction()
     fn = _attr(recon, "analyse_media", "analyze_media", "inspect_photos")
     if fn:
         try:
@@ -359,9 +330,10 @@ def _intake_notes(files: list[dict], usable: list[dict], located: list[dict]) ->
 
 
 def reconstruct(paths: list[Path], address: str) -> Placement | None:
-    """Hand off to Person 1. Returns None when their module is not wired yet,
-    which the caller reports as 'falling back to the prepared asset'."""
-    recon, name, _, _ = _modules()
+    """Hand off to the reconstruction module. Returns None when it is not wired
+    on this machine, which the caller reports as 'falling back to the prepared
+    asset'. See docs/INTEGRATION.md for why that is the normal case."""
+    recon, name = _reconstruction()
     fn = _attr(recon, "reconstruct", "build_asset")
     if not fn:
         return None

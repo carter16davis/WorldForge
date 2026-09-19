@@ -1,13 +1,19 @@
 """The frozen interchange shapes, plus a normaliser that accepts what each
-teammate actually emits.
+producer actually emits.
 
-AGENTS.md froze `placement.json` (schemaVersion 1). Person 1's pipeline branch
-emits a different shape (`procedura.building/0.1`). Rather than block on a
-schema argument mid-hackathon, the viewer accepts both and normalises inward;
-everything downstream of `normalize_placement` sees one shape.
+AGENTS.md froze `placement.json` (schemaVersion 1). The reconstruction side
+emits a different shape (`procedura.building/0.1`) in an ENU frame. Both are
+accepted and normalised inward; everything downstream of `normalize_placement`
+sees one shape.
 
-UI state never leaks into these models. Person 3 hands corrections back as a
-plain `Transform`, exactly the shape Person 2's validator already expects.
+A non-canonical frame (Z-up, or a ground-origin anchor) is *recorded*, not
+rejected. Refusing it would only teach a producer to declare Y-up and ship a
+Z-up mesh, which is the failure this field exists to prevent. Conversion happens
+where the geometry is: `reconstruction.anchor` for a real scan,
+`app.assets.import_mesh` for a mesh loaded into the viewer.
+
+UI state never leaks into these models. The editor hands corrections back as a
+plain `Transform`, exactly the shape the validator already expects.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app import geohash
+from geospatial import build_placement
 
 SCHEMA_VERSION = 1
 Era = Literal["2026", "2426"]
@@ -44,7 +51,7 @@ class SpatialIndex(BaseModel):
 
 
 class Transform(BaseModel):
-    """The only shape the UI sends back. Person 2's packager consumes it as-is."""
+    """The only shape the UI sends back. The packager consumes it as-is."""
 
     headingDegrees: float = 0.0
     metersPerModelUnit: float = Field(default=1.0, gt=0)
@@ -57,6 +64,11 @@ class Transform(BaseModel):
     def _wrap(cls, v: float) -> float:
         # The heading dial is circular; 370 and -350 are the same bearing.
         return v % 360.0
+
+    @property
+    def is_canonical(self) -> bool:
+        """True when the GLB is already in the frame every consumer expects."""
+        return self.anchor == "ground-center" and self.upAxis == "Y"
 
 
 class Models(BaseModel):
@@ -137,7 +149,7 @@ class Provenance(BaseModel):
 
 
 class FacadeCoverage(BaseModel):
-    """One side of the building, as judged by Person 1's coverage agent."""
+    """One side of the building, as judged by the coverage agent."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -173,7 +185,7 @@ class CellCoverage(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _from_procedura_v0(raw: dict[str, Any]) -> dict[str, Any]:
-    """`procedura.building/0.1` (Person 1's branch) -> canonical placement."""
+    """`procedura.building/0.1` (the ENU reconstruction shape) -> canonical."""
     anchor = raw.get("anchor") or {}
     frame = raw.get("frame") or {}
     dims = raw.get("dimensions") or {}
@@ -218,7 +230,7 @@ def _from_procedura_v0(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_placement(raw: dict[str, Any]) -> Placement:
-    """Accept any teammate's placement dialect; return the canonical model.
+    """Accept any producer's placement dialect; return the canonical model.
 
     Unknown-but-harmless keys survive (`extra="allow"`), so a field one of us
     adds mid-hackathon does not get silently dropped on a round trip.
@@ -237,6 +249,27 @@ def normalize_placement(raw: dict[str, Any]) -> Placement:
     if placement.spatialIndex is None:
         placement = placement.with_index()
     return placement
+
+
+def validate_document(raw: dict[str, Any]) -> Placement:
+    """Normalise, then gate on the shared contract before anything is written.
+
+    `build_placement` is the schema gate from `geospatial`: it enforces the
+    assetId charset (so an assetId can never become a path), the finite-number
+    and range rules, and the recognised anchor/up-axis vocabulary. It is called
+    for its exceptions; the pydantic model is what we return, because it carries
+    the extension fields the viewer needs and `build_placement` does not.
+    """
+    placement = normalize_placement(raw)
+    if placement.schemaVersion != SCHEMA_VERSION:
+        raise ValueError(f"Only placement schema version {SCHEMA_VERSION} is supported")
+    build_placement(
+        placement.assetId, placement.name, placement.sourceAddress,
+        {**placement.location.model_dump(), **placement.transform.model_dump()},
+    )
+    return placement.with_index(
+        placement.spatialIndex.precision if placement.spatialIndex else 8
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +310,16 @@ def validate_placement(p: Placement) -> list[str]:
 
     if p.transform.metersPerModelUnit <= 0:
         problems.append("metersPerModelUnit must be positive.")
+
+    if not p.transform.is_canonical:
+        # A warning, not a rejection. The package is still valid and still says
+        # truthfully what frame its mesh is in; it just needs converting before
+        # a Y-up engine loads it.
+        problems.append(
+            f"Model frame is {p.transform.upAxis}-up / {p.transform.anchor}, not the "
+            f"canonical Y-up / ground-center. Run it through reconstruction.anchor "
+            f"before handing the GLB to an engine that assumes glTF conventions."
+        )
 
     h = p.dimensions.heightMeters
     if h is not None:

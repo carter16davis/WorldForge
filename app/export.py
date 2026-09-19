@@ -1,16 +1,25 @@
 """Writes the export contract from AGENTS.md and zips it for download.
 
-    exports/<asset-id>/
+    exports/<export-id>/<asset-id>/
     ├── building.glb
     ├── building-lod.glb        # when a lower-detail model can be derived
     ├── thumbnail.webp
     ├── placement.json
     ├── provenance.json
-    └── coverage.json
+    ├── coverage.json
+    └── manifest.json
+
+Each export is an immutable snapshot under its own `exportId`, so a download
+link handed to someone keeps resolving to the bytes they were shown after the
+placement is edited again.
 
 The GLB stays canonical: heading, scale and vertical offset live in
 placement.json rather than being baked into the geometry, so a correction made
 in the editor is reversible and auditable instead of destructive.
+
+Packaging is staged in a temporary directory and renamed into place, and it
+refuses to overwrite an existing package. A half-written export that looks
+complete is worse than a failed one.
 """
 
 from __future__ import annotations
@@ -19,14 +28,16 @@ import io
 import json
 import logging
 import shutil
+import struct
+import tempfile
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app import geohash
 from app.assets import ASSET_DIR, extrude_footprint, write_glb
-from app.contracts import Placement, validate_placement
-from app.pipeline import _attr, _modules
+from app.contracts import Placement, validate_document, validate_placement
 
 log = logging.getLogger("worldforge.export")
 
@@ -74,76 +85,108 @@ def build_lod(placement: Placement, dest: Path) -> str | None:
     return "building-lod.glb"
 
 
+def check_glb(path: Path) -> None:
+    """Header-level sanity check. Not a full glTF validation, and not a render."""
+    path = Path(path)
+    with path.open("rb") as stream:
+        header = stream.read(12)
+    if len(header) != 12:
+        raise ValueError(f"{path.name}: GLB header is incomplete")
+    magic, version, length = struct.unpack("<4sII", header)
+    if magic != b"glTF" or version != 2 or length != path.stat().st_size or length < 20:
+        raise ValueError(f"{path.name}: expected a GLB v2 file with a matching declared length")
+
+
+def check_webp(path: Path) -> None:
+    with Path(path).open("rb") as stream:
+        header = stream.read(12)
+    if len(header) != 12 or header[:4] != b"RIFF" or header[8:12] != b"WEBP":
+        raise ValueError(f"{Path(path).name}: thumbnail must be a WebP file")
+
+
 def package(placement: Placement, *, provenance: dict, coverage: dict,
             era: str = "2026", source_dir: Path | None = None,
             export_root: Path | None = None) -> dict:
-    """Write the package and return a manifest describing what landed."""
-    _, _, geo, geo_name = _modules()
-    external = _attr(geo, "package", "export_package", "write_package")
-    if external:
-        return external(placement.model_dump(), provenance, coverage, era=era,
-                        source_dir=source_dir or (ASSET_DIR / placement.assetId),
-                        export_root=export_root or EXPORT_ROOT)
+    """Write an immutable export snapshot and return a manifest describing it."""
+    if era not in ("2026", "2426"):
+        raise ValueError("era must be '2026' or '2426'")
 
-    # The index must follow the coordinates — the user may have nudged the
-    # building across a cell boundary in the editor.
-    placement = placement.with_index(
-        placement.spatialIndex.precision if placement.spatialIndex else 8
-    )
-
-    root = export_root or EXPORT_ROOT
-    dest = root / placement.assetId
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True, exist_ok=True)
+    # Re-run the shared contract gate: the caller may have edited the transform
+    # since it was last validated, and the index must follow the coordinates —
+    # the user can nudge a building across a cell boundary in the editor.
+    placement = validate_document(placement.model_dump())
 
     src = source_dir or (ASSET_DIR / placement.assetId)
-    written: list[str] = []
+    export_id = uuid.uuid4().hex
+    root = (export_root or EXPORT_ROOT) / export_id
+    dest = root / placement.assetId
+    if dest.exists() or dest.is_symlink():
+        raise FileExistsError(f"Refusing to overwrite {dest}")
 
-    for name in ("building.glb", "thumbnail.webp"):
-        candidate = src / name
-        if candidate.exists():
-            shutil.copy2(candidate, dest / name)
-            written.append(name)
+    model = src / "building.glb"
+    if not model.is_file():
+        raise ValueError(f"No building.glb for {placement.assetId!r} — nothing to export.")
+    check_glb(model)
+    thumb = src / "thumbnail.webp"
+    if thumb.is_file():
+        check_webp(thumb)
 
-    if (lod := build_lod(placement, dest)) is not None:
-        written.append(lod)
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    root.mkdir(parents=True, exist_ok=True)
 
-    models = {"high": "building.glb" if "building.glb" in written else None,
-              "low": "building-lod.glb" if "building-lod.glb" in written else None}
-    placement = placement.model_copy(update={"models": placement.models.model_copy(
-        update={k: v for k, v in models.items() if v is not None})})
+    with tempfile.TemporaryDirectory(prefix=".worldforge-", dir=root) as temporary:
+        stage = Path(temporary) / "package"
+        stage.mkdir()
+        written = ["building.glb"]
+        shutil.copy2(model, stage / "building.glb")
+        if thumb.is_file():
+            shutil.copy2(thumb, stage / "thumbnail.webp")
+            written.append("thumbnail.webp")
 
-    placement_doc = placement.model_dump(exclude_none=False)
-    placement_doc["era"] = era
-    placement_doc["exportedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if (lod := build_lod(placement, stage)) is not None:
+            check_glb(stage / lod)
+            written.append(lod)
 
-    provenance_doc = dict(provenance)
-    provenance_doc["generatedAt"] = placement_doc["exportedAt"]
-    if era == "2426":
-        provenance_doc["eraTreatment"] = (
-            "Scorched Nebraska presentation. The 2426 appearance is a rendering "
-            "treatment applied in the viewer — geometry, coordinates and scale are "
-            "identical to the 2026 export."
+        models = {"high": "building.glb",
+                  "low": "building-lod.glb" if "building-lod.glb" in written else None}
+        placement = placement.model_copy(
+            update={"models": placement.models.model_copy(update=models)}
         )
 
-    (dest / "placement.json").write_text(json.dumps(placement_doc, indent=2) + "\n")
-    (dest / "provenance.json").write_text(json.dumps(provenance_doc, indent=2) + "\n")
-    (dest / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
-    written += ["placement.json", "provenance.json", "coverage.json"]
+        placement_doc = placement.model_dump(exclude_none=False)
+        placement_doc["era"] = era
+        placement_doc["exportedAt"] = stamp
 
-    problems = validate_placement(placement)
-    manifest = {
-        "assetId": placement.assetId,
-        "era": era,
-        "files": sorted(written),
-        "cell": placement.spatialIndex.cell if placement.spatialIndex else "",
-        "worldforgeUri": world_uri(placement, era),
-        "exportPath": str(dest.relative_to(REPO)) if dest.is_relative_to(REPO) else str(dest),
-        "problems": problems,
-        "valid": not problems,
-    }
-    (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        provenance_doc = {**provenance, "schemaVersion": 1, "generatedAt": stamp}
+        if era == "2426":
+            provenance_doc["eraTreatment"] = (
+                "Scorched Nebraska presentation. The 2426 appearance is a rendering "
+                "treatment applied in the viewer — geometry, coordinates and scale are "
+                "identical to the 2026 export."
+            )
+
+        problems = validate_placement(placement)
+        manifest = {
+            "assetId": placement.assetId,
+            "exportId": export_id,
+            "era": era,
+            "files": sorted(written + ["placement.json", "provenance.json",
+                                       "coverage.json", "manifest.json"]),
+            "cell": placement.spatialIndex.cell if placement.spatialIndex else "",
+            "worldforgeUri": world_uri(placement, era),
+            "exportPath": str(dest.relative_to(REPO)) if dest.is_relative_to(REPO) else str(dest),
+            "problems": problems,
+            "valid": not problems,
+        }
+
+        for name, doc in (("placement.json", placement_doc),
+                          ("provenance.json", provenance_doc),
+                          ("coverage.json", coverage),
+                          ("manifest.json", manifest)):
+            (stage / name).write_text(json.dumps(doc, indent=2, allow_nan=False) + "\n")
+
+        stage.rename(dest)
+
     return manifest
 
 

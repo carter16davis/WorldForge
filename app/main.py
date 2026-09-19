@@ -27,11 +27,10 @@ from pydantic import BaseModel, Field
 
 from app import geohash, pipeline
 from app.assets import ASSET_DIR
-from app.contracts import Placement, normalize_placement, validate_placement
+from app.contracts import Placement, validate_document, validate_placement
 from app.demo_data import DEMO_ASSET_ID, demo_cells, demo_coverage, ensure_demo_asset
 from app.export import EXPORT_ROOT, package, world_uri, zip_package
 from app.geocode import VENUES
-from geospatial.integration import validate_document
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("worldforge")
@@ -212,9 +211,9 @@ async def upload(files: list[UploadFile] = File(default=[]),
                  address: str = Form(default="")) -> dict:
     """Intake for photos/video.
 
-    Always returns a report. If Person 1's reconstruction module is wired it
-    runs; otherwise the response says plainly that the prepared asset is being
-    used, so the demo keeps moving either way.
+    Always returns a report. If a reconstruction module is wired on this
+    machine it runs; otherwise the response says plainly that the prepared asset
+    is being used, so the demo keeps moving either way.
     """
     if not files:
         raise HTTPException(422, "No files received.")
@@ -248,8 +247,10 @@ async def upload(files: list[UploadFile] = File(default=[]),
         else:
             report["asset"] = None
             report["fallback"] = (
-                "Reconstruction is not wired up yet, so the viewer is showing the "
-                "prepared venue asset. Your files were analysed, not reconstructed."
+                "Your files were analysed, not reconstructed. Photogrammetry runs "
+                "in RealityScan on the desktop and needs you to isolate the "
+                "building mid-scan, so it is not driven from this page — see "
+                "docs/INTEGRATION.md. The viewer is showing the prepared venue asset."
             )
         return report
     finally:
@@ -296,12 +297,15 @@ def download(asset_id: str, export_id: str):
 
 @app.exception_handler(Exception)
 async def unhandled(request, exc: Exception):
-    # The UI shows this string verbatim; a stack trace on screen during a demo
-    # is worse than a sentence that says what broke.
+    # The UI shows `detail` verbatim, so it says what broke without quoting the
+    # exception: a stack trace on a projector leaks filesystem paths, and an
+    # exception string is not a sentence a judge can act on. The real error goes
+    # to the server log, where whoever is running the demo can read it.
     log.exception("unhandled error on %s", request.url.path)
     return JSONResponse(
         status_code=500,
-        content={"detail": f"{type(exc).__name__}: {exc}"},
+        content={"detail": "Something went wrong on the WorldForge server. "
+                           "The details are in the server log."},
     )
 
 

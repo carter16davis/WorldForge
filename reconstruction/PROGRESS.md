@@ -2,6 +2,29 @@
 
 Updated: 2026-09-19
 
+> **Consolidation note (later the same day).** The frontend and geospatial
+> branches were merged into this one, and the duplicated halves were collapsed:
+> one geocoder, one packager, one placement model, one virtualenv, one
+> `requirements.txt` at the repository root. `reconstruction/` is now an
+> importable package as well as a CLI, and gained `anchor.py` — the
+> georeferencing step that turns a scan into a map-ready asset. Sections below
+> that predate that merge are kept as a record; where they conflict with the
+> repository, the repository is correct. See `docs/INTEGRATION.md` and the
+> root `README.md`.
+>
+> Specifically superseded: the separate `reconstruction/.venv` and
+> `reconstruction/requirements.txt` (removed — use the root `.venv` and
+> `requirements.txt`); `python reconstruction/pipeline.py ...` (now
+> `python -m reconstruction.pipeline ...`); manually supplied `--bounds`
+> (now measured by `anchor` and read from `anchor-report.json`).
+>
+> The artifact table below lists working files under `reconstruction/input/`,
+> `reconstruction/work/` and `exports/`. Those are gitignored and **are not
+> present in a fresh clone**, including the `IMG_0132-portable` export. There is
+> currently no known-good reconstructed venue asset in the repository; the
+> demo's prepared asset is an OpenStreetMap footprint extrusion built at startup
+> by `app/demo_data.py`, which is honest about being one.
+
 ## Current state and immediate next action
 
 The 40-photo mock-building capture has completed import and alignment in
@@ -176,12 +199,16 @@ source images referenced by saved projects.
 - Local image review gallery with possible-blur/exposure badges and full-size view.
 - User-facing orientation preview and rotate/reset controls.
 - Never automatically delete blur-flagged originals; review and record exclusions.
-- Improved coverage assessment, measured bounds, thumbnails and optional LODs.
+- Improved coverage assessment and thumbnails. (Measured bounds are done — see
+  `anchor.py`. LOD generation is done, in `app/export.py:build_lod`.)
 - Verify a suitable World Cup venue capture and preserve a known-good demo asset.
-- Confirm sponsor format/axis/unit/origin/texture/polygon requirements and coordinate
-  with Person 2 before finalizing delivery conventions.
+- Confirm sponsor format/axis/unit/origin/texture/polygon requirements against
+  the conventions now written down in `geospatial/README.md`. WorldForge writes
+  Y-up, ground-center, metres; `anchor.py` converts anything else into that.
 - Validate the full adjusted-region build and embedded GLB export on real data.
-- Final application integration and map placement remain outside Person 1's scope.
+- Per-facade coverage needs camera poses that the RealityScan export does not
+  currently include, which is why `reconstruction` deliberately does not define
+  `coverage_report`. See `docs/INTEGRATION.md`.
 
 ## References
 

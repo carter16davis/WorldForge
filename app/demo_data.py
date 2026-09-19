@@ -29,11 +29,11 @@ def _footprint() -> dict:
 
 
 def _coverage_report(asset_id: str) -> dict:
-    """A hand-authored stand-in for Person 1's coverage agent.
+    """A hand-authored stand-in for a real coverage agent.
 
     The four facades are the story the UI tells: two verified, one partial, one
-    uncaptured with a concrete recapture instruction. When Person 1's agent
-    lands, `pipeline.coverage_for` prefers it and this is never read.
+    uncaptured with a concrete recapture instruction. When a real coverage
+    agent lands, `pipeline.coverage_for` prefers it and this is never read.
     """
     return CoverageReport(
         assetId=asset_id,

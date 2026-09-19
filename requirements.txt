@@ -1,11 +1,27 @@
+# One environment for the whole project: web app, geospatial conventions,
+# and reconstruction. There used to be a second requirements file under
+# reconstruction/ and a second virtualenv to go with it.
+#
+#   uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
+
+# Web app
 fastapi>=0.115,<1
 uvicorn>=0.30,<1
 pydantic>=2.9,<3
 python-multipart>=0.0.18,<1
+httpx>=0.27,<1
+
+# Geometry and geospatial
 numpy>=2,<3
 trimesh>=4,<5
 shapely>=2,<3
+scipy>=1.11,<2          # trimesh needs a graph engine to split a scan into bodies
 mapbox-earcut>=1,<3
+
+# Media intake
 Pillow>=11,<13
+av>=18.1                # video frame extraction with real presentation timestamps
+pillow-heif>=1.0        # iPhone HEIC straight off the camera roll
+
+# Tests
 pytest>=8,<10
-httpx>=0.27,<1

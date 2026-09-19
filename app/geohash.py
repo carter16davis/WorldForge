@@ -1,9 +1,11 @@
 """Geohash encode/decode/neighbours — pure stdlib.
 
-Person 2 owns the authoritative spatial index. This module exists so the
-viewer and the export packager keep working before that module lands, and so
-the World Cell overlay has something deterministic to draw. If Person 2 ships
-`geospatial.geohash`, `app.pipeline` prefers it and this becomes dead weight.
+The authoritative spatial index for the project. Verified against an
+independent reference implementation in `tests/test_geohash.py`.
+
+Note that the example cell in AGENTS.md (`dr5ru7kq` for MetLife Stadium) is
+wrong; the correct cell for those coordinates is `dr724mue`. Do not quote the
+AGENTS.md value anywhere it will be read as output.
 """
 
 from __future__ import annotations
@@ -30,8 +32,8 @@ def encode(lat: float, lon: float, precision: int = 8) -> str:
     """Latitude/longitude -> geohash cell of the requested precision.
 
     Boundary coordinates round toward the higher cell (`>=`), matching the
-    reference implementations. Person 2's index must use the same tie-break or
-    the two halves of the pipeline will disagree on cells along a cell edge.
+    reference implementations. Any other consumer deriving cells must use the
+    same tie-break, or the two will disagree along a cell edge.
     """
     lat_lo, lat_hi = -90.0, 90.0
     lon_lo, lon_hi = -180.0, 180.0

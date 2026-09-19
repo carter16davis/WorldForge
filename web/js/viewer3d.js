@@ -96,6 +96,12 @@ export class Viewer {
     this.building = new THREE.Group();
     this.scene.add(this.building);
 
+    // Nested inside `building` so the declared up-axis correction is applied
+    // before heading and scale, and so `_clear` can empty the mesh without
+    // discarding that correction.
+    this.frameFix = new THREE.Group();
+    this.building.add(this.frameFix);
+
     this.footprintGroup = new THREE.Group();   // fixed: the model rotates against it
     this.scene.add(this.footprintGroup);
 
@@ -204,7 +210,7 @@ export class Viewer {
     const gltf = await new GLTFLoader().loadAsync(modelUrl);
     if (this.disposed) return;
 
-    this._clear(this.building);
+    this._clear(this.frameFix);
     const root = gltf.scene;
 
     this.meshes = [];
@@ -222,7 +228,7 @@ export class Viewer {
       this.meshes.push(obj);
     });
 
-    this.building.add(root);
+    this.frameFix.add(root);
     this.applyTransform(placement.transform);
     this._buildScatter(placement);
     this._applyEra(this.era);
@@ -235,6 +241,14 @@ export class Viewer {
     const heading = Number(transform.headingDegrees ?? 0);
     const scale = Number(transform.metersPerModelUnit ?? 1);
     const offset = Number(transform.verticalOffsetMeters ?? 0);
+
+    // A mesh that declares itself Z-up is in the ENU frame photogrammetry and
+    // GIS tools emit: +X east, +Y north, +Z up. Lay it down onto glTF's Y-up
+    // before anything else touches it, so heading and scale below mean the same
+    // thing for both conventions. `reconstruction.anchor` converts the geometry
+    // itself; this is what keeps a mesh that skipped that step from appearing on
+    // its side rather than appearing wrong in a way nobody notices.
+    this.frameFix.rotation.x = transform.upAxis === "Z" ? -Math.PI / 2 : 0;
 
     // -Z is north and heading is clockwise from north, so a positive heading
     // is a negative rotation about +Y.

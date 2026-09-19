@@ -1,26 +1,40 @@
-"""Address -> coordinates, with a fallback that survives a dead conference network.
+"""Address -> coordinates. The only geocoder in the project.
 
-Person 2 owns geocoding. Until their module lands, this resolves addresses via
-Nominatim and falls back to a built-in venue table so the live demo never
-depends on a network call succeeding in front of judges.
+Resolution order is deliberate: coordinates typed by hand, then the built-in
+venue table, then OpenStreetMap's Nominatim. The table comes before the network
+so the prepared demo path never waits on a third-party service, and so the same
+address gives the same answer in every rehearsal.
 
 Every result carries its `source` and `confidence` so the UI can say where the
-coordinate came from instead of presenting a guess as a measurement.
+coordinate came from instead of presenting a guess as a measurement. An
+ambiguous address resolves to nothing and returns `candidates` for the user to
+choose from — silently picking the first of five matches is how a building ends
+up on the wrong continent.
+
+Live requests are serialized, rate-limited to one per 1.1 s and cached for the
+process lifetime, per the Nominatim usage policy:
+https://operations.osmfoundation.org/policies/nominatim/
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from app import geohash
+from geospatial import number
 
 USER_AGENT = "WorldForge/0.1 (VTHacks 14 project; contact: team@worldforge.invalid)"
-NOMINATIM = "https://nominatim.openstreetmap.org/search"
+NOMINATIM = os.environ.get("WORLDFORGE_GEOCODER_URL",
+                           "https://nominatim.openstreetmap.org/search")
 TIMEOUT_S = float(os.environ.get("WORLDFORGE_GEOCODE_TIMEOUT", "6"))
+MIN_REQUEST_INTERVAL_S = 1.1
+CACHE_LIMIT = 256
 
 
 @dataclass
@@ -28,10 +42,11 @@ class GeocodeResult:
     latitude: float
     longitude: float
     displayName: str
-    source: str            # "nominatim" | "venue-table" | "coordinates"
+    source: str            # "nominatim" | "venue-table" | "coordinates" | "none"
     confidence: float      # 0..1, how much the placement can lean on this
     cell: str = ""
     note: str = ""
+    candidates: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         d = asdict(self)
@@ -128,44 +143,66 @@ def _match_venue(query: str) -> dict | None:
     return None
 
 
-def _nominatim(query: str) -> GeocodeResult | None:
-    params = urllib.parse.urlencode({"q": query, "format": "jsonv2", "limit": 1})
-    req = urllib.request.Request(f"{NOMINATIM}?{params}", headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
-            hits = json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        # Offline, rate-limited, or DNS-blocked. The caller falls back; the demo
-        # must never die because a third-party service hiccuped.
-        return None
-    if not hits:
-        return None
-    hit = hits[0]
-    # Nominatim's `importance` is a relevance score, not positional accuracy;
-    # treat it as a soft prior and keep it out of the confident range.
-    importance = float(hit.get("importance") or 0.4)
-    return GeocodeResult(
-        latitude=float(hit["lat"]),
-        longitude=float(hit["lon"]),
-        displayName=hit.get("display_name", query),
-        source="nominatim",
-        confidence=round(min(0.95, 0.5 + importance / 2), 3),
-        note=f"OpenStreetMap match ({hit.get('type', 'place')}).",
-    )
+class Geocoder:
+    """One upstream request at a time, at most one per 1.1 s, cached per process."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.last_request = 0.0
+        self.cache: dict[str, list[dict]] = {}
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        """Candidate matches, best first. Raises on a transport or decode failure."""
+        query = " ".join(query.split())
+        if not 3 <= len(query) <= 300:
+            raise ValueError("Enter a place or address between 3 and 300 characters.")
+        with self.lock:
+            key = query.casefold()
+            if key in self.cache:
+                return self.cache[key]
+
+            delay = MIN_REQUEST_INTERVAL_S - (time.monotonic() - self.last_request)
+            if delay > 0:
+                time.sleep(delay)
+
+            params = urllib.parse.urlencode({"q": query, "format": "jsonv2", "limit": limit})
+            req = urllib.request.Request(
+                f"{NOMINATIM}?{params}",
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            )
+            self.last_request = time.monotonic()
+            with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+                hits = json.loads(resp.read(1_000_000).decode("utf-8"))
+
+            matches = [{
+                "label": hit.get("display_name", query),
+                "latitude": number(float(hit["lat"]), "latitude", -90, 90),
+                "longitude": number(float(hit["lon"]), "longitude", -180, 180),
+                "source": "nominatim",
+                # Nominatim's `importance` is a relevance score, not positional
+                # accuracy; treat it as a soft prior, never a confident one.
+                "confidence": round(min(0.95, 0.5 + float(hit.get("importance") or 0.4) / 2), 3),
+                "note": f"OpenStreetMap match ({hit.get('type', 'place')}).",
+            } for hit in hits[:limit]]
+
+            if len(self.cache) >= CACHE_LIMIT:
+                self.cache.pop(next(iter(self.cache)))
+            self.cache[key] = matches
+            return matches
+
+
+GEOCODER = Geocoder()
 
 
 def geocode(query: str, *, allow_network: bool = True) -> GeocodeResult:
     """Resolve an address. Never raises for an unresolvable address — returns a
     zero-confidence result the UI can flag and the user can correct by hand."""
-    query = (query or "").strip()
+    query = " ".join((query or "").strip().split())
     if not query:
         return GeocodeResult(0.0, 0.0, "", "none", 0.0, note="No address entered.")
 
     if (direct := _parse_coordinates(query)) is not None:
         return direct
-
-    if allow_network and (hit := _nominatim(query)) is not None:
-        return hit
 
     if (venue := _match_venue(query)) is not None:
         return GeocodeResult(
@@ -174,7 +211,37 @@ def geocode(query: str, *, allow_network: bool = True) -> GeocodeResult:
             displayName=f'{venue["venue"]} — {venue["address"]}',
             source="venue-table",
             confidence=0.6,
-            note="Offline venue table; coordinates are the venue centre, not a surveyed point.",
+            note="Prepared venue table; coordinates are the venue centre, not a surveyed point.",
+        )
+
+    if not allow_network:
+        return GeocodeResult(
+            0.0, 0.0, query, "none", 0.0,
+            note="Offline: enter 'latitude, longitude' directly, or pick a prepared venue.",
+        )
+
+    try:
+        candidates = GEOCODER.search(query)
+    except Exception:
+        # Offline, rate-limited, or DNS-blocked. The demo must never die because
+        # a third-party service hiccuped.
+        return GeocodeResult(
+            0.0, 0.0, query, "none", 0.0,
+            note="Address search is unavailable. Enter coordinates or pick a prepared venue.",
+        )
+
+    if len(candidates) == 1:
+        hit = candidates[0]
+        return GeocodeResult(
+            latitude=hit["latitude"], longitude=hit["longitude"],
+            displayName=hit["label"], source="nominatim",
+            confidence=hit["confidence"], note=hit["note"],
+        )
+
+    if candidates:
+        return GeocodeResult(
+            0.0, 0.0, query, "none", 0.0, candidates=candidates,
+            note=f"{len(candidates)} possible matches. Choose the intended address.",
         )
 
     return GeocodeResult(

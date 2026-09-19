@@ -69,7 +69,10 @@ def build_commands(project, output, preset, triangles=None):
 
 
 def check_export(output):
-    from pipeline import validate_glb
+    try:
+        from .pipeline import validate_glb
+    except ImportError:
+        from pipeline import validate_glb
     path = output / 'building.glb'
     document = validate_glb(path)
     if not document.get('images') or not document.get('textures') or not document.get('materials'):

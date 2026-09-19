@@ -12,15 +12,15 @@ Use a separate clone/worktree if teammates run agents on the same machine.
 Keep original photos and videos outside Git. From the repository root:
 
 ```bash
-python3 reconstruction/pipeline.py intake --photos /path/to/photos --output reconstruction/work/intake --license-notes "Captured by NAME on DATE; permission and attribution details"
+.venv/bin/python -m reconstruction.pipeline intake --photos /path/to/photos --output reconstruction/work/intake --license-notes "Captured by NAME on DATE; permission and attribution details"
 ```
 
 For image-quality checks:
 
 ```bash
-python3 -m venv reconstruction/.venv
-reconstruction/.venv/bin/python -m pip install -r reconstruction/requirements.txt
-reconstruction/.venv/bin/python reconstruction/pipeline.py intake --photos /path/to/photos --output reconstruction/work/reviewed-intake --license-notes "Captured by NAME on DATE; permission and attribution details" --check-quality
+uv venv .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+.venv/bin/python -m reconstruction.pipeline intake --photos /path/to/photos --output reconstruction/work/reviewed-intake --license-notes "Captured by NAME on DATE; permission and attribution details" --check-quality
 ```
 
 On Windows use `py` to create the environment and
@@ -45,7 +45,7 @@ Install/update dependencies using the command above, then pass `--video` instead
 of `--photos`:
 
 ```bash
-reconstruction/.venv/bin/python reconstruction/pipeline.py intake --video /path/to/capture.mp4 --output reconstruction/work/video-intake --license-notes "Recorded by NAME on DATE; permission and attribution details" --frame-interval 1 --max-frames 300 --check-quality
+.venv/bin/python -m reconstruction.pipeline intake --video /path/to/capture.mp4 --output reconstruction/work/video-intake --license-notes "Recorded by NAME on DATE; permission and attribution details" --frame-interval 1 --max-frames 300 --check-quality
 ```
 
 This samples the first video stream, saving full-resolution PNG frames in
@@ -72,13 +72,13 @@ use a standard SDR recording for the initial capture.
 
 ### Correct existing photos
 
-HEIC/HEIF input is supported through `pillow-heif` in requirements.txt. Run
+HEIC/HEIF input is supported through `pillow-heif` in the project's `requirements.txt`. Run
 `orient` first to create PNG copies before RealityScan `prepare`; keep its
 `orientation.json` with the original evidence. The intake quality checks can also
 read HEIC directly. Original files are preserved.
 
 ```bash
-reconstruction/.venv/bin/python reconstruction/pipeline.py orient --photos reconstruction/work/photos --output reconstruction/work/upright-photos
+.venv/bin/python -m reconstruction.pipeline orient --photos reconstruction/work/photos --output reconstruction/work/upright-photos
 ```
 
 This applies EXIF orientation (including mirrored photo orientations) and writes
@@ -106,7 +106,7 @@ it automatically translates paths when running in this WSL workspace.
 ### Stage 1: prepare and align
 
 ```bash
-reconstruction/.venv/bin/python reconstruction/pipeline.py prepare --photos reconstruction/work/IMG_0132-upright/frames
+.venv/bin/python -m reconstruction.pipeline prepare --photos reconstruction/work/IMG_0132-upright/frames
 ```
 
 Or supply any photo directory. A unique run folder is created under
@@ -145,7 +145,7 @@ See [official export documentation](https://rshelp.capturingreality.com/en-US/to
 Substitute the actual prepared project path printed by Stage 1:
 
 ```bash
-reconstruction/.venv/bin/python reconstruction/pipeline.py build --project reconstruction/work/scans/YOUR-RUN/aligned.rsproj
+.venv/bin/python -m reconstruction.pipeline build --project reconstruction/work/scans/YOUR-RUN/aligned.rsproj
 ```
 
 Type exactly **Continue** to confirm you isolated the subject, saved, and closed
@@ -173,14 +173,55 @@ CLI commands verified against the [official command list](https://rshelp.capturi
 The resulting `building.glb` can be passed directly to the packaging command below. Coordinate final units,
 origin and format with Person 2 and the sponsor.
 
-## 3. Package the handoff
+## 3. Anchor the scan to the Earth
 
-Example dimensions below are placeholders: substitute measured model-unit bounds.
-Under the proposed Y-up convention, width is X extent, length Z, and height Y.
-Person 2 supplies meters-per-model-unit; this tool does not set geographic placement.
+This is the step that turns a scan into an asset. RealityScan's mesh is in
+arbitrary local space: it does not know where it is, which way north is, how
+large it is, or where its ground plane sits, and it still contains whatever
+shared the reconstruction region.
 
 ```bash
-python3 reconstruction/pipeline.py package --model /path/to/building.glb --thumbnail /path/to/thumbnail.webp --report reconstruction/work/intake --asset-id venue-example-001 --bounds 100 80 30 --output reconstruction/work/venue-example-001
+.venv/bin/python -m reconstruction.pipeline anchor \
+    --model exports/YOUR-RUN/building.glb --output reconstruction/work/anchored \
+    --asset-id venue-example-001 --latitude 40.8135 --longitude -74.0745 \
+    --address "1 MetLife Stadium Dr, East Rutherford, NJ" \
+    --footprint app/data/metlife_footprint.json --reference-meters 250
+```
+
+It writes an anchored `building.glb` (ground at y=0, footprint centre at the
+origin, Y-up, metres), a `placement.json`, and an `anchor-report.json` recording
+each step's method and confidence. The command prints that report:
+
+```text
+  OK   groundPlane = 3.668  (lowest-dense-band, confidence 0.95)
+  OK   isolation = 0.0402   (largest-vertical-body, confidence 0.6)
+  OK   scale = 10.0         (reference-measurement, confidence 0.95)
+  OK   heading = 205.0      (footprint-match, confidence 0.9)
+```
+
+`--footprint` is a JSON file of `[[lat, lon], ...]` for the real building, used
+to solve both scale and heading. `--reference-meters` is one measured real-world
+length along the building's longest horizontal axis and overrides the footprint
+match for scale, because a tape measure beats a polygon.
+
+Neither is required. Without them the geometry is still cleaned, grounded and
+re-origined, and scale and heading are reported **unsolved** — they become
+controls the user moves in the placement editor rather than numbers this tool
+invented. Photogrammetry genuinely cannot recover them: camera EXIF GPS locates
+the photographer, not the building.
+
+A near-symmetric footprint cannot resolve the 180-degree flip from overlap alone.
+The report says so, with both orientations' scores, instead of picking one and
+looking certain. Check a known facade in the editor.
+
+## 4. Package the handoff
+
+Bounds are read from `anchor-report.json` in metres. Pass `--bounds W L H`
+only to override them; packaging refuses measured bounds from an anchor run that
+did not solve a metric scale, because those are in arbitrary model units.
+
+```bash
+.venv/bin/python -m reconstruction.pipeline package --model /path/to/building.glb --thumbnail /path/to/thumbnail.webp --report reconstruction/work/intake --asset-id venue-example-001 --output reconstruction/work/venue-example-001
 ```
 
 Output contains `building.glb`, `thumbnail.webp`, `provenance.json`, `confidence.json`,
@@ -188,16 +229,17 @@ and `reconstruction.json` matching the existing reconstruction handoff shape. Pa
 in the handoff resolve relative to its directory; agree on this interpretation with
 teammates before integration. Both commands refuse to overwrite an existing output
 directory. The GLB check verifies its container and rejects external resource URIs;
-it is not a full glTF validator or proof of correct rendering. Bounds are supplied
-manually and the thumbnail check only identifies its container.
+it is not a full glTF validator or proof of correct rendering. The thumbnail check
+only identifies its container.
 
-Preserve a known-good venue package for judging. The next coding tasks are measured
-bounds extraction and alignment-based coverage.
+Preserve a known-good venue package for judging. The next coding task is
+alignment-based coverage, which needs camera poses the current export does not
+include.
 
 ## Verification
 
 ```bash
-reconstruction/.venv/bin/python -m unittest discover -s reconstruction/tests -v
+.venv/bin/python -m pytest reconstruction/tests -v
 ```
 
 ## Deferred follow-up

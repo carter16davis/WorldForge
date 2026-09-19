@@ -291,12 +291,35 @@ def validate_glb(path):
     return document
 
 
+def measured_bounds(report):
+    """Read width/length/height in meters from an anchor run, or explain why not.
+
+    Typing bounds by hand is how a 68-meter stadium ships as 68 model units. The
+    anchor command measures them off the mesh, so packaging prefers that record
+    and only falls back to a typed value when it is given one.
+    """
+    path = Path(report) / 'anchor-report.json'
+    if not path.is_file():
+        raise ValueError('Supply --bounds, or run anchor first so bounds can be measured.')
+    measured = json.loads(path.read_text(encoding='utf-8')).get('boundsMeters') or {}
+    if not measured.get('measured'):
+        raise ValueError('The anchor run did not solve a metric scale, so its bounds '
+                         'are in arbitrary model units. Re-run anchor with '
+                         '--reference-meters or --footprint, or pass --bounds.')
+    try:
+        return [float(measured[key]) for key in ('widthMeters', 'lengthMeters', 'heightMeters')]
+    except KeyError as error:
+        raise ValueError(f'anchor-report.json is missing {error.args[0]}.') from error
+
+
 def package(model, thumbnail, report, output, asset_id, bounds):
     model, thumbnail, report, output = map(Path, (model, thumbnail, report, output))
     if not asset_id.strip():
         raise ValueError('Asset ID must not be empty.')
+    if bounds is None:
+        bounds = measured_bounds(report)
     if any(not math.isfinite(v) or v <= 0 for v in bounds):
-        raise ValueError('Bounds must be positive, finite model-unit dimensions.')
+        raise ValueError('Bounds must be positive, finite dimensions in meters.')
     validate_glb(model)
     preview = thumbnail.read_bytes()
     if len(preview) < 12 or preview[:4] != b'RIFF' or preview[8:12] != b'WEBP':
@@ -312,8 +335,49 @@ def package(model, thumbnail, report, output, asset_id, bounds):
         'assetId': asset_id, 'modelPath': 'building.glb',
         'thumbnailPath': 'thumbnail.webp',
         'bounds': dict(zip(('width', 'length', 'height'), bounds)),
+        'boundsUnit': 'meters',
         'confidenceReportPath': 'confidence.json', 'provenancePath': 'provenance.json',
     })
+
+
+def anchor_scan(args):
+    """Georeference a scan and write the anchored GLB plus its report."""
+    from . import anchor as anchoring
+
+    footprint = None
+    if args.footprint:
+        footprint = [(float(a), float(b))
+                     for a, b in json.loads(Path(args.footprint).read_text())]
+    result = anchoring.anchor_model(
+        args.model, args.latitude, args.longitude,
+        asset_id=args.asset_id, name=args.name, address=args.address,
+        osm_footprint=footprint, reference_meters=args.reference_meters,
+        elevation_meters=args.elevation, up_axis=args.up_axis,
+        out_dir=args.output,
+    )
+    output = Path(args.output)
+    write_json(output / 'placement.json', result['placement'])
+    report = result['report']
+    print(f"Anchored {args.asset_id} -> {output}")
+    for step in report['steps']:
+        mark = 'OK  ' if step['solved'] else 'TODO'
+        value = '' if step['value'] is None else f" = {step['value']}"
+        print(f"  {mark} {step['name']}{value}  ({step['method'] or 'n/a'}, "
+              f"confidence {step['confidence']})")
+        if step['note']:
+            print(f"       {step['note']}")
+    if report['unresolved']:
+        print("\nUnresolved, set these in the placement editor: "
+              + ', '.join(report['unresolved']))
+
+
+def _desktop():
+    """Import the RealityScan driver as a package submodule or a sibling script."""
+    try:
+        from . import desktop
+    except ImportError:
+        import desktop
+    return desktop
 
 
 def main():
@@ -343,19 +407,39 @@ def main():
     capture.add_argument('--output', required=True)
     capture.add_argument('--license-notes', required=True)
     capture.add_argument('--check-quality', action='store_true', help='Decode images and flag possible blur/exposure issues')
+    place = commands.add_parser('anchor', help='Georeference a scan: ground, isolate, scale, heading, re-origin')
+    place.add_argument('--model', required=True, help='GLB or OBJ exported from RealityScan')
+    place.add_argument('--output', required=True, help='New folder for building.glb and anchor-report.json')
+    place.add_argument('--asset-id', required=True)
+    place.add_argument('--latitude', type=float, required=True)
+    place.add_argument('--longitude', type=float, required=True)
+    place.add_argument('--name', default='')
+    place.add_argument('--address', default='')
+    place.add_argument('--elevation', type=float, default=0.0,
+                       help='Ground elevation in meters, or 0 for a documented relative datum')
+    place.add_argument('--footprint', help='JSON file holding [[lat, lon], ...] for the real building')
+    place.add_argument('--reference-meters', type=float,
+                       help='One measured real-world length along the building\'s longest horizontal axis')
+    place.add_argument('--up-axis', choices=('Y', 'Z'), default='Y',
+                       help="The exported mesh's up axis (default: Y, the glTF convention)")
+
     export = commands.add_parser('package')
     for name in ('model', 'thumbnail', 'report', 'output', 'asset-id'):
         export.add_argument('--' + name, required=True)
-    export.add_argument('--bounds', nargs=3, type=float, required=True,
-                        metavar=('WIDTH', 'LENGTH', 'HEIGHT'), help='Measured model-unit dimensions')
+    export.add_argument('--bounds', nargs=3, type=float,
+                        metavar=('WIDTH', 'LENGTH', 'HEIGHT'),
+                        help='Dimensions in meters. Omit to read them from the '
+                             'anchor-report.json written by the anchor command.')
     args = parser.parse_args()
     try:
         if args.command == 'prepare':
-            import desktop
+            desktop = _desktop()
             desktop.prepare(args.photos, args.output, args.realityscan, args.dry_run)
         elif args.command == 'build':
-            import desktop
+            desktop = _desktop()
             desktop.build(args.project, args.export_settings, args.triangles, args.realityscan, args.dry_run)
+        elif args.command == 'anchor':
+            anchor_scan(args)
         elif args.command == 'orient':
             orient_photos(args.photos, args.output, args.rotate)
         elif args.command == 'intake':
