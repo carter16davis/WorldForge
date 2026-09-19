@@ -1,0 +1,106 @@
+{
+  "photos": [
+    {
+      "file": "IMG_1213.HEIC",
+      "errors": [],
+      "pixels": "3024x4032",
+      "megapixels": 12.2,
+      "camera": "Apple iPhone 13",
+      "orientation": 1,
+      "taken": "2026:09:19 11:46:49",
+      "focal_mm": 5.1,
+      "focal_35mm_equiv": 26,
+      "fov_h_deg": 69.4,
+      "gps": {
+        "lat": 37.23224722222223,
+        "lon": -80.42566666666667
+      },
+      "altitude_m": 634.0,
+      "heading_deg": 235.7,
+      "heading_ref": "true",
+      "dest_bearing_deg": 235.7,
+      "gps_accuracy_m": 15.1
+    },
+    {
+      "file": "IMG_1214.HEIC",
+      "errors": [],
+      "pixels": "3024x4032",
+      "megapixels": 12.2,
+      "camera": "Apple iPhone 13",
+      "orientation": 1,
+      "taken": "2026:09:19 11:46:54",
+      "focal_mm": 5.1,
+      "focal_35mm_equiv": 26,
+      "fov_h_deg": 69.4,
+      "gps": {
+        "lat": 37.23224722222223,
+        "lon": -80.42566666666667
+      },
+      "altitude_m": 634.0,
+      "heading_deg": 318.2,
+      "heading_ref": "true",
+      "dest_bearing_deg": 318.2,
+      "gps_accuracy_m": 14.5
+    },
+    {
+      "file": "IMG_1215.HEIC",
+      "errors": [],
+      "pixels": "3024x4032",
+      "megapixels": 12.2,
+      "camera": "Apple iPhone 13",
+      "orientation": 1,
+      "taken": "2026:09:19 11:46:59",
+      "focal_mm": 5.1,
+      "focal_35mm_equiv": 26,
+      "fov_h_deg": 69.4,
+      "gps": {
+        "lat": 37.23224722222223,
+        "lon": -80.42566666666667
+      },
+      "altitude_m": 634.0,
+      "heading_deg": 157.7,
+      "heading_ref": "true",
+      "dest_bearing_deg": 157.7,
+      "gps_accuracy_m": 11.7
+    },
+    {
+      "file": "IMG_1216.HEIC",
+      "errors": [],
+      "pixels": "3024x4032",
+      "megapixels": 12.2,
+      "camera": "Apple iPhone 13",
+      "orientation": 1,
+      "taken": "2026:09:19 11:47:06",
+      "focal_mm": 5.1,
+      "focal_35mm_equiv": 26,
+      "fov_h_deg": 69.4,
+      "gps": {
+        "lat": 37.23224722222223,
+        "lon": -80.42566666666667
+      },
+      "altitude_m": 634.0,
+      "heading_deg": 66.3,
+      "heading_ref": "true",
+      "dest_bearing_deg": 66.3,
+      "gps_accuracy_m": 10.6
+    }
+  ],
+  "verdict": {
+    "photos": 4,
+    "with_gps": 4,
+    "with_heading": 4,
+    "with_lens_info": 4,
+    "camera_spread_m": 0.0,
+    "distinct_view_directions": 4,
+    "can": [
+      "place the building at a real address automatically",
+      "know which wall each photo shows",
+      "recover camera intrinsics for multi-view work",
+      "see more than one side of the building"
+    ],
+    "cannot": [
+      "attempt real multi-view reconstruction (needs >5m spread)"
+    ],
+    "unreadable": 0
+  }
+}

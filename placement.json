@@ -1,0 +1,78 @@
+{
+  "schema": "procedura.building/0.1",
+  "address": "1200 N St, Lincoln, NE",
+  "anchor": {
+    "lat": 40.81363,
+    "lon": -96.7043,
+    "ground_alt_m": 0.0
+  },
+  "frame": {
+    "convention": "ENU",
+    "x": "east",
+    "y": "north",
+    "z": "up",
+    "units": "metres",
+    "yaw_deg_from_true_north": 0.0
+  },
+  "footprint_wgs84": [
+    [
+      40.81363,
+      -96.7043
+    ],
+    [
+      40.81363,
+      -96.70396813515627
+    ],
+    [
+      40.81377407888147,
+      -96.70396813515627
+    ],
+    [
+      40.81377407888147,
+      -96.70415777220984
+    ],
+    [
+      40.81390014790276,
+      -96.70415777220984
+    ],
+    [
+      40.81390014790276,
+      -96.7043
+    ]
+  ],
+  "dimensions": {
+    "floors": 4,
+    "eave_height_m": 15.5,
+    "ridge_height_m": 15.5,
+    "footprint_area_m2": 616.0
+  },
+  "appearance": {
+    "roof": "flat",
+    "material": "red_brick",
+    "facade_color": "#8d4b3a"
+  },
+  "photo_alignment": {
+    "wall_index": 0,
+    "confidence": 0.972
+  },
+  "lattice": {
+    "voxel_m": 1.0,
+    "origin_ijk": [
+      0,
+      0,
+      0
+    ],
+    "size": [
+      30,
+      32,
+      16
+    ],
+    "solid_voxels": 9856,
+    "encoding": "z-runs[i,j,k0,len]"
+  },
+  "provenance": {
+    "footprint": "osm/overpass",
+    "height": "vlm-floor-count x floor-height",
+    "overall_confidence": 0.78
+  }
+}

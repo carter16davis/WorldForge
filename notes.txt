@@ -1,0 +1,7 @@
+# WORKFLOWS:
+Videos --framify--> Imagges --generative model--> 3D model 
+         Images ----/
+    (Inputs)
+
+# AGING THE BUILDING
+Use a fine-tuned model for image gen that can age building. 

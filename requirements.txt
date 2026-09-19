@@ -1,0 +1,27 @@
+# --- geometry -------------------------------------------------------------
+numpy>=2.0
+shapely>=2.0            # polygon ops; replaces the hand-rolled simplify/area
+pyproj>=3.6             # UTM / WGS84 when the ENU approximation isn't enough
+trimesh>=4.4            # mesh assembly + OBJ/GLB/PLY export
+mapbox-earcut>=1.0      # polygon triangulation for concave roofs
+
+# --- data sources ---------------------------------------------------------
+requests>=2.32          # Census geocoder, Overpass, Mapillary
+tenacity>=9.0           # Overpass rate-limits aggressively; retry with backoff
+
+# --- imagery --------------------------------------------------------------
+pillow>=10.4            # load photos, read EXIF
+opencv-python-headless>=4.10   # homography for facade rectification
+
+# --- vision model ---------------------------------------------------------
+anthropic>=0.40
+python-dotenv>=1.0
+
+# --- demo API -------------------------------------------------------------
+fastapi>=0.115
+uvicorn[standard]>=0.32
+python-multipart>=0.0.12   # required for file upload endpoints
+
+# --- dev ------------------------------------------------------------------
+pytest>=8.3
+pillow-heif>=1.0          # iPhone HEIC photos
