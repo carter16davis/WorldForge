@@ -53,14 +53,46 @@ The live demo must use a prepared reconstruction so it does not depend on cloud 
 
 Implement these only after the complete MVP works:
 
-1. Coverage analysis and guided recapture
-2. Evidence-aware texture completion
-3. Observed versus inferred surface overlay
-4. 2026-to-2426 appearance slider
-5. Automatic footprint matching
-6. Automatic model simplification and levels of detail
-7. Collision mesh generation
-8. GoDaddy ANS agents for source discovery and verification
+1. Geohash-based World Cells and coverage heatmap
+2. Coverage analysis and guided recapture
+3. Evidence-aware texture completion
+4. Observed versus inferred surface overlay
+5. 2026-to-2426 appearance slider
+6. Automatic footprint matching
+7. Automatic model simplification and levels of detail
+8. Collision mesh generation
+9. GoDaddy ANS agents for source discovery and verification
+
+## World Cells and geohashing
+
+WorldForge can organize assets into hierarchical geographic cells using a geohash derived from each asset's latitude and longitude. The geohash is an index and discovery mechanism, not a replacement for the precise coordinates in `placement.json`.
+
+Example asset identity:
+
+```text
+worldforge://dr5ru7/venue-metlife-001
+```
+
+### Practical uses
+
+- Load low-detail assets for broad parent cells and progressively load higher-detail assets as the user zooms in
+- Export a building, neighborhood, or map tile as a portable cell package
+- Display a coverage heatmap with `uncaptured`, `partial`, `verified`, and `synthetic` states
+- Detect likely duplicate building submissions within the same cell or neighboring cells
+- Let multiple contributors capture adjacent cells to assemble a shared world
+- Store present and future variants under one spatial identity, such as `dr5ru7/metlife/2026` and `dr5ru7/metlife/2426`
+
+The demo can highlight the venue's cell after geocoding, reveal nearby cell coverage, and then transition the selected asset between its 2026 and 2426 states. This makes geospatial indexing visible to judges instead of leaving it as an internal implementation detail.
+
+### Capture quests
+
+As an optional community layer, the coverage agent can turn missing evidence into location-based capture missions. A quest should identify a target cell, the under-observed facade or angle, and a concrete capture request.
+
+Example:
+
+> The northwest facade is under-observed. Visit cell `dr5ru7kx` and capture five overlapping photos while moving from the north facade toward the west facade.
+
+Completed quests can improve a cell's confidence status and earn a verified-cell badge. Location safety, property access, privacy, and media licensing must be considered before presenting or assigning a quest.
 
 ## Evidence-aware reconstruction agent
 
@@ -155,6 +187,13 @@ Suggested `placement.json`:
     "longitude": -74.0745,
     "elevationMeters": 2.4
   },
+  "spatialIndex": {
+    "system": "geohash",
+    "precision": 8,
+    "cell": "dr5ru7kq",
+    "parentCells": ["dr5ru7k", "dr5ru7", "dr5ru"],
+    "neighbors": ["dr5ru7km", "dr5ru7kr", "dr5ru7kx"]
+  },
   "transform": {
     "headingDegrees": 87,
     "metersPerModelUnit": 1,
@@ -223,6 +262,7 @@ Definition of done:
 Responsibilities:
 
 - Implement address geocoding
+- Derive and validate the asset's geohash and neighboring World Cells
 - Resolve or approximate ground elevation
 - Obtain a building footprint when available
 - Define coordinate, unit, axis, origin, and anchor conventions
@@ -252,6 +292,7 @@ Responsibilities:
 
 - Build the upload and address-entry interface
 - Build the map and 3D model preview
+- Visualize the selected World Cell and nearby coverage states
 - Add manual controls for heading, scale, and ground offset
 - Visualize coverage confidence and generated surfaces
 - Implement the 2026-to-2426 presentation toggle or slider
@@ -345,9 +386,11 @@ Milestone: complete MVP workflow works from input selection to export.
 
 ### Phase 3 — Differentiation
 
+- Add World Cells and the geohash coverage heatmap
 - Add coverage analysis
 - Add provenance and confidence visualization
 - Add the 2026-to-2426 treatment
+- Add capture quests only if the coverage workflow is stable
 - Add one high-value secondary-track feature only if the MVP remains stable
 
 Milestone: polished story with technically defensible AI use.
@@ -375,6 +418,8 @@ Milestone: polished story with technically defensible AI use.
 ## Testing checklist
 
 - Address resolves to the expected location
+- Geohash is deterministically derived from the exported latitude and longitude
+- Parent and neighboring World Cells are valid at the declared precision
 - Model is upright and faces the intended direction
 - Model scale is plausible relative to its footprint
 - Model sits on the ground instead of floating or sinking
