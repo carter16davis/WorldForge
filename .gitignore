@@ -1,2 +1,9 @@
-# Generated scan runs; retain source and scripts in Git.
-/exports/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Generated scan runs and demo assets; retain source and scripts in Git.
+exports/
+web/assets/
+uploads/

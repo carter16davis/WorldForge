@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en" data-era="2026">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorldForge — Photo to Map-Ready 3D Building</title>
+<link rel="stylesheet" href="./vendor/maplibre/maplibre-gl.css">
+<link rel="stylesheet" href="./css/app.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.js",
+    "three/addons/": "./vendor/three/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <div>
+      <h1>WorldForge</h1>
+      <p>Photo to map-ready 3D building</p>
+    </div>
+  </div>
+
+  <div class="identity">
+    <label>Spatial identity</label>
+    <code id="world-uri" title="Geohash cell / asset / era">worldforge://…</code>
+  </div>
+
+  <div class="capabilities" id="capabilities" aria-label="Pipeline status"></div>
+</header>
+
+<main class="layout">
+
+  <!-- ─────────────────────────── control rail ─────────────────────────── -->
+  <aside class="rail" id="rail">
+
+    <section class="step" data-step="1">
+      <h2><span class="num">1</span> Source media</h2>
+
+      <div class="dropzone" id="dropzone" tabindex="0" role="button"
+           aria-label="Add building photos or video">
+        <strong>Drop photos or video</strong>
+        <span>or click to browse — JPEG, HEIC, PNG, MP4, MOV</span>
+        <input type="file" id="file-input" multiple hidden
+               accept="image/*,video/*,.heic,.heif">
+      </div>
+
+      <div class="intake" id="intake" hidden></div>
+
+      <details class="prepared">
+        <summary>Use a prepared World Cup venue</summary>
+        <select id="venue-select" aria-label="Prepared venue"></select>
+        <p class="hint">The prepared asset is built offline from an OpenStreetMap
+           footprint, so the demo never waits on a cloud job.</p>
+      </details>
+    </section>
+
+    <section class="step" data-step="2">
+      <h2><span class="num">2</span> Address</h2>
+      <form class="address" id="address-form">
+        <input type="text" id="address-input" autocomplete="off" spellcheck="false"
+               placeholder="1 MetLife Stadium Dr, East Rutherford, NJ"
+               aria-label="Street address or latitude, longitude">
+        <button type="submit" id="geocode-btn">Locate</button>
+      </form>
+      <div class="resolved" id="resolved" hidden></div>
+      <div id="address-candidates" aria-label="Choose a matching address"></div>
+    </section>
+
+    <section class="step" data-step="3">
+      <h2><span class="num">3</span> Placement</h2>
+
+      <div class="control">
+        <div class="control-head">
+          <label for="heading">Heading</label>
+          <output id="heading-out">0°</output>
+        </div>
+        <input type="range" id="heading" min="0" max="359" step="1" value="0">
+        <p class="hint">Rotation of the model clockwise from true north.</p>
+      </div>
+
+      <div class="control">
+        <div class="control-head">
+          <label for="scale">Scale</label>
+          <output id="scale-out">1.00 m / unit</output>
+        </div>
+        <input type="range" id="scale" min="0.25" max="4" step="0.01" value="1">
+        <p class="hint" id="scale-hint">Metres of real world per model unit.</p>
+      </div>
+
+      <div class="control">
+        <div class="control-head">
+          <label for="offset">Ground offset</label>
+          <output id="offset-out">0.0 m</output>
+        </div>
+        <input type="range" id="offset" min="-25" max="25" step="0.1" value="0">
+        <p class="hint">Positive lifts the model; negative sinks it.</p>
+      </div>
+
+      <button class="ghost" id="reset-transform">Reset transform</button>
+
+      <dl class="facts" id="facts"></dl>
+    </section>
+
+    <section class="step" data-step="4">
+      <h2><span class="num">4</span> Evidence</h2>
+      <p class="hint" id="coverage-source"></p>
+      <div class="confidence" id="confidence"></div>
+      <ul class="facades" id="facades"></ul>
+      <div class="recommendations" id="recommendations"></div>
+      <label class="switch">
+        <input type="checkbox" id="coverage-toggle">
+        <span>Shade the model by what was actually observed</span>
+      </label>
+    </section>
+
+    <section class="step" data-step="5">
+      <h2><span class="num">5</span> Export</h2>
+      <div class="problems" id="problems"></div>
+      <button class="primary" id="export-btn">Export package</button>
+      <div class="export-result" id="export-result" hidden></div>
+    </section>
+
+  </aside>
+
+  <!-- ───────────────────────────── stage ──────────────────────────────── -->
+  <div class="stage">
+
+    <div class="viewports">
+      <section class="viewport viewport--3d">
+        <div class="viewport-head">
+          <h3>Model</h3>
+          <div class="viewport-tools">
+            <button class="chip" id="frame-btn" title="Frame the building">Reframe</button>
+            <button class="chip" id="grid-btn" aria-pressed="true" title="10 m reference grid">Grid</button>
+            <button class="chip" id="human-btn" aria-pressed="true" title="1.8 m figure for scale">Scale ref</button>
+          </div>
+        </div>
+        <div class="canvas-host" id="three-host"></div>
+        <div class="viewport-badge" id="three-badge">loading…</div>
+      </section>
+
+      <section class="viewport viewport--map">
+        <div class="viewport-head">
+          <h3>World Cells</h3>
+          <div class="viewport-tools">
+            <button class="chip" id="basemap-btn" aria-pressed="true" title="Toggle satellite/street tiles">Basemap</button>
+            <button class="chip" id="cells-btn" aria-pressed="true" title="Toggle the geohash overlay">Cells</button>
+          </div>
+        </div>
+        <div class="canvas-host" id="map-host"></div>
+        <div class="viewport-badge" id="map-badge">loading…</div>
+        <div class="legend" id="legend"></div>
+      </section>
+    </div>
+
+    <div class="timeline">
+      <div class="era-labels">
+        <button class="era-jump" data-era="2026">2026 — preserved venue</button>
+        <button class="era-jump" data-era="2426">2426 — Scorched Nebraska</button>
+      </div>
+      <input type="range" id="era" min="0" max="100" step="1" value="0"
+             aria-label="Era: 2026 to 2426">
+      <p class="era-note" id="era-note"></p>
+    </div>
+
+  </div>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="./vendor/maplibre/maplibre-gl.js"></script>
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>

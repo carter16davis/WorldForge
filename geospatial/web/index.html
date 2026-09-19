@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WorldForge · Placement studio</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header><a class="brand" href="/">◈ WORLDFORGE</a><span>PLACEMENT STUDIO <b>01</b></span></header>
+  <main>
+    <aside>
+      <div class="eyebrow">FROM ADDRESS TO WORLD</div>
+      <h1>Give your building<br>a place in the world.</h1>
+      <p class="intro">Find a location, position your building, and take its placement with you.</p>
+      <form id="search-form">
+        <label for="address">01 / FIND A PLACE</label>
+        <div class="search"><input id="address" value="MetLife Stadium" placeholder="Address or building name" required minlength="3" maxlength="300"><button id="search-button">Find place ↗</button></div>
+      </form>
+      <div id="results" aria-label="Address matches"></div>
+      <button class="text-button" id="demo">Load prepared stadium example</button>
+      <p class="fine">Live searches use OpenStreetMap / Nominatim. Search public places and choose a match to place it.</p>
+      <div id="status" role="status" aria-live="polite">Loading prepared venue…</div>
+      <form id="coordinates">
+        <div class="row"><label>Latitude<input id="latitude" type="number" step="any" min="-85" max="85" value="40.8135" required></label><label>Longitude<input id="longitude" type="number" step="any" min="-180" max="180" value="-74.0745" required></label></div>
+        <button class="secondary">Apply coordinates</button>
+      </form>
+      <section class="adjust">
+        <label>02 / ADJUST PLACEMENT</label>
+        <label for="heading">Heading <output id="heading-value">0°</output></label>
+        <input id="heading" type="range" min="0" max="359" value="0">
+        <label for="scale">Scale <output id="scale-value">1.0×</output></label>
+        <input id="scale" type="range" min="0.2" max="3" step="0.1" value="1">
+        <label for="offset">Height above ground <output id="offset-value">0 m</output></label>
+        <input id="offset" type="range" min="-20" max="60" step="1" value="0">
+        <p class="fine">Drag the anchor or click the map to move it. The outline is an illustrative 60 × 90 m block at scale 1, not the stadium’s measured shape.</p>
+      </section>
+      <button id="download" class="primary" disabled>Download placement.json ↓</button>
+      <p class="fine">Placement instructions only. Your partner’s 3D model connects next.</p>
+    </aside>
+    <section class="workspace">
+      <div class="map-title"><div><span class="eyebrow">LOCATION PREVIEW</span><h2 id="place-name">MetLife Stadium</h2></div><button id="recenter" class="secondary">Recenter ⌖</button></div>
+      <div id="map"><p class="map-fallback">Loading map… The local building preview below works without map tiles.</p></div>
+      <div class="map-note"><span><i></i> Placeholder footprint · line points forward</span><span id="position"></span></div>
+      <div class="bottom">
+        <section class="card"><span class="eyebrow">BUILDING PREVIEW</span><h3>See your adjustments</h3>
+          <svg id="building-preview" viewBox="0 0 400 230" role="img" aria-label="Illustrative building showing heading, scale, and height above a reference ground plane">
+            <defs><pattern id="grid" width="24" height="12" patternUnits="userSpaceOnUse"><path d="M 24 0 L 0 0 0 12" fill="none" stroke="#d5dfd9" stroke-width="0.7"/></pattern></defs>
+            <path d="M 20 140 L 200 55 L 380 140 L 200 225 Z" fill="url(#grid)" stroke="#d5dfd9"/>
+            <polygon id="shadow" fill="#c9d9c8" opacity="0.7"/>
+            <g id="walls"></g><polygon id="roof" fill="#d8edaa" stroke="#344d37" stroke-width="1.5"/>
+            <line id="front-line" stroke="#2f5830" stroke-width="3"/>
+            <text x="20" y="25" fill="#6a7569" font-size="12">ILLUSTRATIVE BLOCK · NOT A RECONSTRUCTION</text>
+          </svg>
+          <p id="dimensions" class="fine"></p>
+        </section>
+        <section class="card"><span class="eyebrow">PLACEMENT DATA</span><h3>The instructions behind the scene</h3><pre id="json">Waiting for placement…</pre><p class="fine">Ground reference: 0 m (relative demo datum). No terrain elevation has been measured.</p></section>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
