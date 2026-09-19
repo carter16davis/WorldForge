@@ -67,7 +67,7 @@ GET  /api/jobs/{id}    ->  { status, stage, progress, detail, log[], asset? }
 GET  /api/engines      ->  { engines[], canReconstruct }
 ```
 
-An upload batch is kept on disk under `uploads/batch-*/photos/`, because the job
+An upload batch is kept on disk under `uploads/batch-*/source/`, because the job
 re-reads the originals. It used to be deleted at the end of the upload request,
 which is why nothing could ever be reconstructed from it.
 
@@ -81,15 +81,55 @@ Job stages, and roughly what each costs:
 
 | Stage | Share | What it does |
 | --- | --- | --- |
-| `analyse` | 4% | blur, exposure, exact duplicates, EXIF, SHA-256 per photo |
+| `extract` | 6% | video to frames, merged with any uploaded photos |
+| `analyse` | 4% | blur, exposure, exact duplicates, EXIF, SHA-256 per image |
 | `geocode` | 1% | address to coordinates |
-| `reconstruct` | 85% | the engine |
+| `reconstruct` | 79% | the engine |
 | `anchor` | 7% | ground, isolation, scale, heading, re-origin |
 | `publish` | 3% | write the asset where the viewer loads it |
 
 Job state lives in `uploads/jobs/<id>/job.json`, not in memory, so a restart
 leaves a record. A job left `running` by a restart is marked failed when the
 store reloads — a running job with no thread behind it would poll forever.
+
+## Media assembly
+
+`reconstruction/media.py` turns an upload into one folder of stills.
+
+- `classify(dir)` splits photos, videos and unusable files.
+- `probe(video)` returns duration, frame rate, resolution and codec, or an
+  `error` explaining why the file cannot be read.
+- `plan_interval(duration)` picks a sampling interval targeting
+  `TARGET_FRAMES` (80), clamped to `MIN_INTERVAL_S`..`MAX_INTERVAL_S`
+  (0.2–3.0 s).
+- `assemble(source, work, ...)` returns a `MediaSet` and writes `work/media/`.
+- `merge_provenance(provenance, media_set)` folds the derivation back in.
+
+Sampling uses presentation timestamps via `pipeline.intake_video`, so a
+variable-frame-rate recording samples evenly in *time*. Frames from different
+clips are prefixed with the source stem so two videos whose internal frame names
+both start at `frame_000001.png` cannot overwrite each other.
+
+`assemble` raises only when nothing usable came out. One unreadable video is
+recorded in `MediaSet.skipped` and the rest proceeds — losing one clip should not
+discard a good set of photos.
+
+After the merge, `provenance.json` carries:
+
+```json
+{
+  "sourceMedia": [
+    {"path": "walkaround.mp4", "kind": "video", "sha256": "...",
+     "extraction": {"tool": "PyAV", "intervalSeconds": 0.2, "frameLimitReached": false},
+     "framesExtracted": 40},
+    {"path": "walkaround__frame_000001.png", "kind": "frame", "sha256": "...",
+     "derivedFrom": {"sourceVideo": "walkaround.mp4", "sha256": "...",
+                     "presentationTimestampSeconds": 0.0}},
+    {"path": "corner.png", "kind": "photo", "sha256": "..."}
+  ],
+  "mediaSummary": {"photos": 1, "frames": 40, "total": 41, "videos": [...], "skipped": []}
+}
+```
 
 ## Engines
 

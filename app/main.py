@@ -42,8 +42,10 @@ WEB = REPO / "web"
 UPLOAD_ROOT = REPO / "uploads"
 JOBS = jobs.JobStore(UPLOAD_ROOT / "jobs")
 
-MAX_UPLOAD_BYTES = 80 * 1024 * 1024
-MAX_UPLOAD_FILES = 60
+# A phone walkaround video is routinely hundreds of megabytes, so the old 80 MB
+# cap rejected exactly the input this path exists to accept.
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+MAX_UPLOAD_FILES = 200
 
 
 @asynccontextmanager
@@ -94,6 +96,10 @@ class ReconstructRequest(BaseModel):
     longitude: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
     referenceMeters: float | None = Field(default=None, gt=0, le=2000, allow_inf_nan=False)
     licenseNotes: str = ""
+    # Video sampling. Left unset, the interval is chosen from the clip's own
+    # duration to land near 80 frames — see reconstruction.media.plan_interval.
+    frameInterval: float | None = Field(default=None, gt=0, le=60, allow_inf_nan=False)
+    maxFrames: int = Field(default=300, ge=10, le=2000)
 
 
 # ---------------------------------------------------------------------------
@@ -234,19 +240,21 @@ async def upload(files: list[UploadFile] = File(default=[]),
 
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     batch = Path(tempfile.mkdtemp(prefix="batch-", dir=UPLOAD_ROOT))
-    photos = batch / "photos"
-    photos.mkdir()
+    source = batch / "source"
+    source.mkdir()
     saved: list[Path] = []
     total = 0
     try:
         for f in files:
             # Flatten any path the browser sent; only the basename is ours to trust.
-            dest = photos / Path(f.filename or "upload.bin").name
+            dest = source / Path(f.filename or "upload.bin").name
             with dest.open("wb") as out:
                 while chunk := await f.read(1 << 20):
                     total += len(chunk)
                     if total > MAX_UPLOAD_BYTES:
-                        raise HTTPException(413, "Upload exceeds 80 MB.")
+                        raise HTTPException(
+                            413, f"Upload exceeds "
+                                 f"{MAX_UPLOAD_BYTES // (1024 * 1024 * 1024)} GB.")
                     out.write(chunk)
             saved.append(dest)
 
@@ -278,8 +286,8 @@ def reconstruct(req: ReconstructRequest) -> dict:
     """Start a reconstruction job over an uploaded batch. Returns a job id."""
     if not re.fullmatch(r"batch-[A-Za-z0-9_]+", req.batchId):
         raise HTTPException(400, "Invalid batch id.")
-    photos = UPLOAD_ROOT / req.batchId / "photos"
-    if not photos.is_dir():
+    source = UPLOAD_ROOT / req.batchId / "source"
+    if not source.is_dir():
         raise HTTPException(404, "That upload batch is gone. Upload the photos again.")
 
     if (req.latitude is None) != (req.longitude is None):
@@ -297,11 +305,12 @@ def reconstruct(req: ReconstructRequest) -> dict:
 
     asset_id = f"scan-{req.batchId.removeprefix('batch-')[:12].lower()}"
     job = JOBS.create(address=req.address, assetId=asset_id,
-                      photoCount=sum(1 for _ in photos.iterdir()))
-    jobs.start(JOBS, job.id, photos_dir=photos, address=req.address,
+                      photoCount=sum(1 for _ in source.iterdir()))
+    jobs.start(JOBS, job.id, source_dir=source, address=req.address,
                asset_root=ASSET_DIR, asset_id=asset_id, engine=engine,
                latitude=req.latitude, longitude=req.longitude,
-               reference_meters=req.referenceMeters, license_notes=req.licenseNotes)
+               reference_meters=req.referenceMeters, license_notes=req.licenseNotes,
+               frame_interval=req.frameInterval, max_frames=req.maxFrames)
     return {"jobId": job.id, "assetId": asset_id, "engine": engine.name}
 
 

@@ -274,7 +274,26 @@ def analyse_media(paths: list[Path], *, blur_threshold: float = 80.0) -> dict:
                     "photo" if suffix in IMAGE_SUFFIXES else "other",
             "issues": [],
         }
-        if row["kind"] == "photo":
+        if row["kind"] == "video":
+            # Show the sampling plan before anyone waits on a reconstruction.
+            from reconstruction.media import plan_interval, probe
+
+            info = probe(p)
+            if "error" in info:
+                row["issues"].append(info["error"])
+            else:
+                row.update({k: v for k, v in info.items() if v is not None})
+                duration = info.get("durationSeconds")
+                interval = plan_interval(duration)
+                row["plannedIntervalSeconds"] = interval
+                row["estimatedFrames"] = (
+                    max(1, int(duration / interval)) if duration else None)
+                if duration and duration < 8:
+                    row["issues"].append(
+                        f"Only {duration:.0f}s long — too short to walk around a "
+                        f"building, so coverage will be one-sided.")
+
+        elif row["kind"] == "photo":
             try:
                 from PIL import Image
                 with Image.open(p) as im:
@@ -302,12 +321,14 @@ def analyse_media(paths: list[Path], *, blur_threshold: float = 80.0) -> dict:
         files.append(row)
 
     usable = [f for f in files if f["kind"] in ("photo", "video") and not f["issues"]]
+    video_frames = sum(f.get("estimatedFrames") or 0 for f in files if f["kind"] == "video")
     located = [f for f in files if f.get("gps")]
     return {
         "files": files,
         "usableCount": len(usable),
         "totalCount": len(files),
         "geotaggedCount": len(located),
+        "videoFrameEstimate": video_frames,
         "notes": _intake_notes(files, usable, located),
         "provider": "built-in intake",
     }
@@ -318,11 +339,30 @@ def _intake_notes(files: list[dict], usable: list[dict], located: list[dict]) ->
     if not files:
         notes.append("No files received.")
         return notes
+
+    videos = [f for f in files if f["kind"] == "video"]
+    stills = [f for f in usable if f["kind"] == "photo"]
+    estimated = sum(f.get("estimatedFrames") or 0 for f in videos)
+
+    if videos:
+        plan = ", ".join(
+            f'{v["name"]}: ~{v["estimatedFrames"]} frames every '
+            f'{v["plannedIntervalSeconds"]}s'
+            for v in videos if v.get("estimatedFrames"))
+        if plan:
+            notes.append(f"Video will be sampled on reconstruct — {plan}.")
+        if not stills:
+            notes.append(
+                "Everything came from video. Frames carry motion blur and heavier "
+                "compression than stills, so photographs of the same building "
+                "reconstruct better.")
+
     if not usable:
-        notes.append("No usable frames — every file was flagged. Recapture before reconstructing.")
-    elif len(usable) < 8:
+        notes.append("No usable media — every file was flagged. Recapture before reconstructing.")
+    elif len(stills) + estimated < 20:
         notes.append(
-            f"Only {len(usable)} usable frames. Photogrammetry wants 20+ with 60–80% overlap."
+            f"About {len(stills) + estimated} image(s) to work from. Photogrammetry "
+            f"wants 20+ with 60–80% overlap between consecutive frames."
         )
     if not located:
         notes.append("No GPS in EXIF — placement will rely entirely on the typed address.")

@@ -485,8 +485,11 @@ function renderIntake(report) {
   host.hidden = false;
 
   const summary = el("div", "intake-summary");
+  summary.append(frag(`<b>${report.usableCount}</b> of ${report.totalCount} usable`));
+  if (report.videoFrameEstimate) {
+    summary.append(frag(`<b>~${report.videoFrameEstimate}</b> frames from video`));
+  }
   summary.append(
-    frag(`<b>${report.usableCount}</b> of ${report.totalCount} usable`),
     frag(`<b>${report.geotaggedCount}</b> geotagged`),
     frag(`via ${report.provider}`),
   );
@@ -498,6 +501,14 @@ function renderIntake(report) {
     row.append(el("div", "fname", f.name));
     const bits = [`${(f.sizeBytes / 1048576).toFixed(1)} MB`];
     if (f.width) bits.push(`${f.width}×${f.height}`);
+    if (f.kind === "video") {
+      row.dataset.kind = "video";
+      if (f.durationSeconds) bits.push(`${f.durationSeconds.toFixed(1)}s`);
+      if (f.frameRate) bits.push(`${f.frameRate.toFixed(0)} fps`);
+      if (f.estimatedFrames) {
+        bits.push(`~${f.estimatedFrames} frames @ ${f.plannedIntervalSeconds}s`);
+      }
+    }
     if (f.sharpness !== undefined) bits.push(`sharp ${f.sharpness.toFixed(0)}`);
     row.append(el("div", "meta", bits.join(" · ")));
     for (const issue of f.issues) row.append(el("div", "issue", issue));

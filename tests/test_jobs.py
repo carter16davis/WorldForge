@@ -48,7 +48,7 @@ def fake_engine_cmd(tmp_path):
 
 @pytest.fixture
 def photos(tmp_path):
-    folder = tmp_path / "batch" / "photos"
+    folder = tmp_path / "batch" / "source"
     folder.mkdir(parents=True)
     rng = np.random.default_rng(7)
     for i in range(12):
@@ -124,7 +124,7 @@ def test_job_produces_a_placed_anchored_asset(fake_engine_cmd, photos, tmp_path)
     assets = tmp_path / "assets"
 
     placement = jobs.run_job(
-        store, job.id, photos_dir=photos, address="MetLife Stadium",
+        store, job.id, source_dir=photos, address="MetLife Stadium",
         asset_root=assets, asset_id="scan-test",
         engine=engines.ExternalEngine(fake_engine_cmd),
         reference_meters=BUILDING_W,
@@ -166,7 +166,7 @@ def test_provenance_records_the_unattended_region_and_the_real_photos(
     store = _store(tmp_path)
     job = store.create()
     assets = tmp_path / "assets"
-    jobs.run_job(store, job.id, photos_dir=photos, address="MetLife Stadium",
+    jobs.run_job(store, job.id, source_dir=photos, address="MetLife Stadium",
                  asset_root=assets, asset_id="scan-test",
                  engine=engines.ExternalEngine(fake_engine_cmd))
 
@@ -190,14 +190,16 @@ def test_coverage_reports_only_what_was_measured(fake_engine_cmd, photos, tmp_pa
     store = _store(tmp_path)
     job = store.create()
     assets = tmp_path / "assets"
-    jobs.run_job(store, job.id, photos_dir=photos, address="MetLife Stadium",
+    jobs.run_job(store, job.id, source_dir=photos, address="MetLife Stadium",
                  asset_root=assets, asset_id="scan-test",
                  engine=engines.ExternalEngine(fake_engine_cmd))
 
     coverage = json.loads((assets / "scan-test" / "coverage.json").read_text())
     assert coverage["facades"] == []
     assert coverage["measured"]["perFacadeCoverage"] is None
-    assert coverage["measured"]["uniquePhotos"] == 12
+    assert coverage["measured"]["uniqueImages"] == 12
+    assert coverage["measured"]["fromPhotos"] == 12
+    assert coverage["measured"]["fromVideo"] == 0
     assert any("20 or more" in r for r in coverage["recommendations"])
     assert any("camera poses" in r for r in coverage["recommendations"])
 
@@ -216,7 +218,7 @@ def test_unresolvable_address_fails_the_job_before_reconstructing(photos, tmp_pa
 
     with patch("app.geocode.urllib.request.urlopen", side_effect=OSError("offline")), \
          pytest.raises(ValueError, match="did not resolve"):
-        jobs.run_job(store, job.id, photos_dir=photos,
+        jobs.run_job(store, job.id, source_dir=photos,
                      address="zzz nowhere at all zzz",
                      asset_root=tmp_path / "assets", asset_id="scan-test",
                      engine=Exploding())
@@ -293,7 +295,7 @@ def test_upload_then_reconstruct_over_http(fake_engine_cmd, tmp_path, monkeypatc
 
         # The batch must still be on disk; it used to be deleted in a finally,
         # which is why nothing could ever be reconstructed from it.
-        assert (tmp_path / "uploads" / report["batchId"] / "photos").is_dir()
+        assert (tmp_path / "uploads" / report["batchId"] / "source").is_dir()
 
         started = client.post("/api/reconstruct", json={
             "batchId": report["batchId"], "address": "MetLife Stadium",
@@ -370,3 +372,69 @@ def test_no_engine_gives_503_not_a_fake_asset(tmp_path, monkeypatch):
             "batchId": report["batchId"], "address": "MetLife Stadium"})
         assert refused.status_code == 503
         assert "No reconstruction engine" in refused.json()["detail"]
+
+
+def test_a_video_upload_alone_produces_a_placed_building(fake_engine_cmd, tmp_path):
+    """The headline: someone uploads one clip of a building and gets an asset."""
+    from tests.test_media import write_clip
+
+    source = tmp_path / "batch" / "source"
+    source.mkdir(parents=True)
+    write_clip(source / "walkaround.mp4", seconds=6.0)
+
+    store = _store(tmp_path)
+    job = store.create(address="MetLife Stadium")
+    assets = tmp_path / "assets"
+
+    placement = jobs.run_job(
+        store, job.id, source_dir=source, address="MetLife Stadium",
+        asset_root=assets, asset_id="scan-video",
+        engine=engines.ExternalEngine(fake_engine_cmd), reference_meters=BUILDING_W,
+    )
+
+    assert placement["location"]["latitude"] == pytest.approx(40.8135, abs=0.01)
+    assert (assets / "scan-video" / "building.glb").read_bytes()[:4] == b"glTF"
+
+    provenance = json.loads((assets / "scan-video" / "provenance.json").read_text())
+    summary = provenance["mediaSummary"]
+    assert summary["photos"] == 0
+    assert summary["frames"] >= 20
+    assert summary["videos"][0]["name"] == "walkaround.mp4"
+
+    # The frames are traceable back to the clip, not just counted.
+    frames = [r for r in provenance["sourceMedia"] if r["kind"] == "frame"]
+    assert len(frames) == summary["frames"]
+    assert all(f["derivedFrom"]["sourceVideo"] == "walkaround.mp4" for f in frames)
+
+    coverage = json.loads((assets / "scan-video" / "coverage.json").read_text())
+    assert coverage["measured"]["fromVideo"] == summary["frames"]
+    assert coverage["measured"]["fromPhotos"] == 0
+    assert any("motion blur" in r for r in coverage["recommendations"])
+
+    log = "\n".join(store.get(job.id).log)
+    assert "extract" in log and "walkaround.mp4" in log
+
+
+def test_upload_reports_the_sampling_plan_for_a_video(tmp_path):
+    """The plan has to be visible before anyone commits to a slow reconstruction."""
+    from app.pipeline import analyse_media
+    from tests.test_media import write_clip
+
+    clip = write_clip(tmp_path / "clip.mp4", seconds=10.0)
+    report = analyse_media([clip])
+    row = report["files"][0]
+
+    assert row["kind"] == "video"
+    assert row["durationSeconds"] == pytest.approx(10.0, abs=0.3)
+    assert row["plannedIntervalSeconds"] == pytest.approx(0.2, abs=0.05)
+    assert row["estimatedFrames"] >= 20
+    assert report["videoFrameEstimate"] == row["estimatedFrames"]
+    assert any("sampled on reconstruct" in n for n in report["notes"])
+
+
+def test_a_clip_too_short_to_walk_around_is_flagged(tmp_path):
+    from app.pipeline import analyse_media
+    from tests.test_media import write_clip
+
+    row = analyse_media([write_clip(tmp_path / "quick.mp4", seconds=3.0)])["files"][0]
+    assert any("too short" in issue for issue in row["issues"])

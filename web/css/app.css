@@ -532,3 +532,7 @@ button.ghost:hover { border-color: var(--accent); color: var(--text); }
   background: rgba(0,0,0,.28); border-radius: 4px; font-size: 10px; line-height: 1.5;
   white-space: pre-wrap; word-break: break-word;
 }
+
+.intake-file[data-kind="video"] .fname::before {
+  content: "\25B6"; margin-right: 5px; color: var(--accent); font-size: 9px;
+}

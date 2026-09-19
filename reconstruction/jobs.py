@@ -6,7 +6,8 @@ change, and the browser polls `/api/jobs/{id}`.
 
 The stages are the whole product in order:
 
-    analyse      per-photo intake — blur, exposure, duplicates, EXIF GPS
+    extract      video to frames, merged with any uploaded photos
+    analyse      per-image intake — blur, exposure, duplicates, EXIF GPS
     geocode      the address, because the mesh will need somewhere to be
     reconstruct  the engine (RealityScan, or a configured external command)
     anchor       ground plane, isolation, scale, heading, re-origin
@@ -29,12 +30,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-STAGES = ('analyse', 'geocode', 'reconstruct', 'anchor', 'publish')
+STAGES = ('extract', 'analyse', 'geocode', 'reconstruct', 'anchor', 'publish')
 
 # Rough share of wall-clock each stage takes, so the progress bar is not a lie.
 # Reconstruction dominates by an order of magnitude.
-STAGE_WEIGHT = {'analyse': 0.04, 'geocode': 0.01, 'reconstruct': 0.85,
-                'anchor': 0.07, 'publish': 0.03}
+STAGE_WEIGHT = {'extract': 0.06, 'analyse': 0.04, 'geocode': 0.01,
+                'reconstruct': 0.79, 'anchor': 0.07, 'publish': 0.03}
 
 
 def _now():
@@ -144,28 +145,47 @@ class JobStore:
 # The pipeline
 # ---------------------------------------------------------------------------
 
-def run_job(store, job_id, photos_dir, address, *, asset_root, asset_id,
+def run_job(store, job_id, source_dir, address, *, asset_root, asset_id,
             engine=None, latitude=None, longitude=None, osm_footprint=None,
-            reference_meters=None, license_notes=''):
-    """Photos to a placed asset. Raises on failure; the caller records it."""
+            reference_meters=None, license_notes='', frame_interval=None,
+            max_frames=300):
+    """Uploaded media to a placed asset. Raises on failure; the caller records it."""
     from . import anchor as anchoring
     from . import engine as engines
+    from . import media as media_module
     from .pipeline import intake
 
-    photos_dir = Path(photos_dir)
-    work = photos_dir.parent
+    source_dir = Path(source_dir)
+    work = source_dir.parent
     note = lambda stage, detail, f=0.0: store.note(job_id, stage, detail, f)
 
+    # --- extract -----------------------------------------------------------
+    # Whatever was uploaded becomes one folder of stills. A video is sampled by
+    # presentation timestamp so a variable-frame-rate phone recording does not
+    # end up densely covering whichever wall the person walked past slowly.
+    note('extract', 'Sorting the upload; extracting frames from any video.')
+    media = media_module.assemble(
+        source_dir, work, license_notes=license_notes,
+        frame_interval=frame_interval, max_frames=max_frames,
+        progress=lambda detail: note('extract', detail, 0.5),
+    )
+    store.update(job_id, photoCount=media.total)
+    note('extract',
+         f'{media.total} image(s) to reconstruct from '
+         f'({media.photos} uploaded, {media.frames} from video).', 1.0)
+
     # --- analyse -----------------------------------------------------------
-    note('analyse', 'Checking the photos for blur, exposure and duplicates.')
+    note('analyse', 'Checking the images for blur, exposure and duplicates.')
     reports = work / 'intake'
     shutil.rmtree(reports, ignore_errors=True)
-    intake(photos_dir, reports, license_notes or 'Uploaded through the WorldForge web app.',
+    intake(media.directory, reports,
+           license_notes or 'Uploaded through the WorldForge web app.',
            check_quality=True)
     confidence = json.loads((reports / 'confidence.json').read_text())
-    provenance = json.loads((reports / 'provenance.json').read_text())
+    provenance = media_module.merge_provenance(
+        json.loads((reports / 'provenance.json').read_text()), media)
     flagged = sum(1 for row in confidence.get('imageQuality') or [] if row.get('flags'))
-    note('analyse', f'{confidence["uniquePhotoCount"]} unique photos, {flagged} flagged.', 1.0)
+    note('analyse', f'{confidence["uniquePhotoCount"]} unique images, {flagged} flagged.', 1.0)
 
     # --- geocode -----------------------------------------------------------
     if latitude is None or longitude is None:
@@ -192,7 +212,7 @@ def run_job(store, job_id, photos_dir, address, *, asset_root, asset_id,
         )
     store.update(job_id, engine=engine.name)
     note('reconstruct', f'Starting {engine.name}. This is the slow part.')
-    raw = engine.run(photos_dir, work / 'scan',
+    raw = engine.run(media.directory, work / 'scan',
                      progress=lambda stage, detail: note('reconstruct', detail, 0.5))
     note('reconstruct', f'{engine.name} exported {raw.name}.', 1.0)
 
@@ -222,6 +242,7 @@ def run_job(store, job_id, photos_dir, address, *, asset_root, asset_id,
 
     provenance.update({
         'reconstructionTool': engine.name,
+        'mediaSummary': media.as_dict(),
         'regionMode': 'automatic',
         'regionNote': (
             'The reconstruction region was placed automatically because this run '
@@ -236,14 +257,14 @@ def run_job(store, job_id, photos_dir, address, *, asset_root, asset_id,
     })
     (destination / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
     (destination / 'coverage.json').write_text(
-        json.dumps(_coverage_from_intake(asset_id, confidence, report), indent=2) + '\n')
+        json.dumps(_coverage_from_intake(asset_id, confidence, report, media), indent=2) + '\n')
 
     _write_thumbnail(placement, destination / 'thumbnail.webp')
     note('publish', 'Done.', 1.0)
     return placement
 
 
-def _coverage_from_intake(asset_id, confidence, anchor_report):
+def _coverage_from_intake(asset_id, confidence, anchor_report, media=None):
     """A coverage report built only from what was actually measured.
 
     Deliberately not per-facade. Per-facade coverage needs the camera poses from
@@ -259,8 +280,15 @@ def _coverage_from_intake(asset_id, confidence, anchor_report):
     recommendations = []
     if photos < 20:
         recommendations.append(
-            f'Only {photos} unique photos. Walk right around the building and '
+            f'Only {photos} unique images. Walk right around the building and '
             f'capture 20 or more with 60-80% overlap between consecutive frames.')
+    if media is not None and media.frames and not media.photos:
+        recommendations.append(
+            'Every image came from video. Video frames carry motion blur and '
+            'heavier compression than stills, so a set of photographs of the '
+            'same building will reconstruct better.')
+    for skipped in (media.skipped if media is not None else []):
+        recommendations.append(f'{skipped["name"]} was not used: {skipped["reason"]}')
     if flagged:
         recommendations.append(
             f'{len(flagged)} photo(s) flagged for blur or exposure. Re-shoot those '
@@ -278,7 +306,9 @@ def _coverage_from_intake(asset_id, confidence, anchor_report):
         'assetId': asset_id,
         'overallConfidence': 0.0,
         'facades': [],
-        'measured': {'uniquePhotos': photos, 'flaggedPhotos': len(flagged),
+        'measured': {'uniqueImages': photos, 'flaggedImages': len(flagged),
+                     'fromVideo': media.frames if media is not None else 0,
+                     'fromPhotos': media.photos if media is not None else photos,
                      'perFacadeCoverage': None},
         'recommendations': recommendations,
     }

@@ -27,16 +27,40 @@ adjust heading, scale and vertical offset, then export a ZIP.
 
 ## Reconstructing a building from photos
 
-1. Drop 20+ photos taken while walking right around the building, with 60–80%
-   overlap between consecutive frames.
+1. Drop **photos, a video walkaround, or both**. For photos, 20+ taken while
+   walking right around the building with 60–80% overlap. For video, one
+   continuous clip of the same walk — 30 seconds or more.
 2. Enter the address. This is required before reconstruction starts, not after:
    a mesh with nowhere to go is not map-ready, and finding that out *after* ten
    minutes of photogrammetry is worse than finding out immediately.
 3. Press **Reconstruct this building**, and watch the stages:
-   `analyse → geocode → reconstruct → anchor → publish`.
+   `extract → analyse → geocode → reconstruct → anchor → publish`.
 
-The result is a model measured from your photographs, anchored to the geocoded
+The result is a model measured from your own media, anchored to the geocoded
 coordinate, grounded, re-origined and ready to export.
+
+### Video
+
+An uploaded video is sampled into stills before reconstruction. Sampling is by
+*presentation timestamp*, not decoded frame index: a phone records at a variable
+frame rate, and sampling by index would cover whichever wall you walked past
+slowly far more densely than the rest.
+
+The interval is chosen from the clip's own duration to land near 80 frames,
+clamped to 0.2–3.0 s. Below the floor consecutive frames are near-identical and
+cost processing time without adding parallax; above the ceiling a walking pace
+leaves gaps alignment cannot bridge. The upload screen shows the plan
+(`~40 frames @ 0.2s`) before you commit to a slow run. Override per job with
+`frameInterval` and `maxFrames` on `POST /api/reconstruct`.
+
+Photos and video in the same upload are merged into one set. Every extracted
+frame keeps a `derivedFrom` record in `provenance.json` naming the source video,
+its SHA-256 and the timestamp the frame came from — a frame is evidence only
+insofar as you can say which second of which file it came from.
+
+Frames are not as good as photographs: they carry motion blur and heavier
+compression. When a reconstruction came only from video, `coverage.json` says so
+in its recommendations rather than leaving you to wonder why the mesh is soft.
 
 ### Engines
 
