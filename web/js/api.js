@@ -35,6 +35,9 @@ export const api = {
   cells: (lat, lon, precision = 8) =>
     request(`/api/cells?lat=${lat}&lon=${lon}&precision=${precision}`),
   exportPackage: (placement, era) => postJson("/api/export", { placement, era }),
+  engines: () => request("/api/engines"),
+  reconstruct: (body) => postJson("/api/reconstruct", body),
+  job: (id) => request(`/api/jobs/${id}`),
   upload: (files, address) => {
     const form = new FormData();
     for (const f of files) form.append("files", f, f.name);

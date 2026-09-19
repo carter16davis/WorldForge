@@ -507,3 +507,28 @@ button.ghost:hover { border-color: var(--accent); color: var(--text); }
 }
 /* Explicit result selection for ambiguous geocoder responses. */
 .address-candidate { display:block; width:100%; margin:6px 0; padding:10px; text-align:left; white-space:normal; cursor:pointer; }
+
+/* ── reconstruction job ─────────────────────────────────────────────── */
+.reconstruct { margin-top: 12px; display: grid; gap: 8px; }
+.reconstruct > button {
+  width: 100%; padding: 9px 12px; font: inherit; font-size: 12px; font-weight: 600;
+  color: #16130a; background: var(--accent); border: 0; border-radius: 6px; cursor: pointer;
+}
+.reconstruct > button:hover:not(:disabled) { filter: brightness(1.08); }
+.reconstruct > button:disabled { opacity: .45; cursor: not-allowed; }
+.job { display: grid; gap: 6px; }
+.job-head {
+  display: flex; justify-content: space-between; font-size: 11px;
+  color: var(--text-mute); text-transform: uppercase; letter-spacing: .04em;
+}
+.job-bar { height: 4px; border-radius: 2px; background: rgba(255,255,255,.08); overflow: hidden; }
+.job-bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+.job[data-status="failed"] .job-bar > i { background: #e06060; }
+.job[data-status="done"] .job-bar > i { background: #45c08a; }
+.job-detail { margin: 0; font-size: 11px; color: var(--text-mute); line-height: 1.45; }
+.job-log { font-size: 11px; color: var(--text-mute); }
+.job-log pre {
+  max-height: 150px; overflow: auto; margin: 6px 0 0; padding: 6px;
+  background: rgba(0,0,0,.28); border-radius: 4px; font-size: 10px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+}

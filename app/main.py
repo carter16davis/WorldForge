@@ -31,6 +31,8 @@ from app.contracts import Placement, validate_document, validate_placement
 from app.demo_data import DEMO_ASSET_ID, demo_cells, demo_coverage, ensure_demo_asset
 from app.export import EXPORT_ROOT, package, world_uri, zip_package
 from app.geocode import VENUES
+from reconstruction import jobs
+from reconstruction.engine import engine_status, select_engine
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("worldforge")
@@ -38,6 +40,7 @@ log = logging.getLogger("worldforge")
 REPO = Path(__file__).resolve().parent.parent
 WEB = REPO / "web"
 UPLOAD_ROOT = REPO / "uploads"
+JOBS = jobs.JobStore(UPLOAD_ROOT / "jobs")
 
 MAX_UPLOAD_BYTES = 80 * 1024 * 1024
 MAX_UPLOAD_FILES = 60
@@ -82,6 +85,15 @@ class ValidateRequest(BaseModel):
 class ExportRequest(BaseModel):
     placement: dict[str, Any]
     era: str = "2026"
+
+
+class ReconstructRequest(BaseModel):
+    batchId: str
+    address: str = ""
+    latitude: float | None = Field(default=None, ge=-85, le=85, allow_inf_nan=False)
+    longitude: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+    referenceMeters: float | None = Field(default=None, gt=0, le=2000, allow_inf_nan=False)
+    licenseNotes: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -222,12 +234,14 @@ async def upload(files: list[UploadFile] = File(default=[]),
 
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     batch = Path(tempfile.mkdtemp(prefix="batch-", dir=UPLOAD_ROOT))
+    photos = batch / "photos"
+    photos.mkdir()
     saved: list[Path] = []
     total = 0
     try:
         for f in files:
             # Flatten any path the browser sent; only the basename is ours to trust.
-            dest = batch / Path(f.filename or "upload.bin").name
+            dest = photos / Path(f.filename or "upload.bin").name
             with dest.open("wb") as out:
                 while chunk := await f.read(1 << 20):
                     total += len(chunk)
@@ -240,21 +254,76 @@ async def upload(files: list[UploadFile] = File(default=[]),
         report["batchId"] = batch.name
         report["fingerprint"] = pipeline.media_fingerprint(saved)
 
-        reconstructed = pipeline.reconstruct(saved, address)
-        if reconstructed is not None:
-            report["asset"] = _bundle(reconstructed)
-            report["fallback"] = None
-        else:
-            report["asset"] = None
-            report["fallback"] = (
-                "Your files were analysed, not reconstructed. Photogrammetry runs "
-                "in RealityScan on the desktop and needs you to isolate the "
-                "building mid-scan, so it is not driven from this page — see "
-                "docs/INTEGRATION.md. The viewer is showing the prepared venue asset."
-            )
+        # The batch is kept on disk: /api/reconstruct runs against it next, and
+        # a reconstruction has to be able to re-read the originals. It used to be
+        # deleted here, which is why nothing could ever be reconstructed.
+        report["asset"] = None
+        report["engines"] = engine_status()
+        report["canReconstruct"] = any(e["available"] for e in report["engines"])
         return report
-    finally:
+    except Exception:
         shutil.rmtree(batch, ignore_errors=True)
+        raise
+
+
+@app.get("/api/engines")
+def engines() -> dict:
+    """Which reconstruction backends can run here, and why the others cannot."""
+    status = engine_status()
+    return {"engines": status, "canReconstruct": any(e["available"] for e in status)}
+
+
+@app.post("/api/reconstruct")
+def reconstruct(req: ReconstructRequest) -> dict:
+    """Start a reconstruction job over an uploaded batch. Returns a job id."""
+    if not re.fullmatch(r"batch-[A-Za-z0-9_]+", req.batchId):
+        raise HTTPException(400, "Invalid batch id.")
+    photos = UPLOAD_ROOT / req.batchId / "photos"
+    if not photos.is_dir():
+        raise HTTPException(404, "That upload batch is gone. Upload the photos again.")
+
+    if (req.latitude is None) != (req.longitude is None):
+        raise HTTPException(422, "Supply both latitude and longitude, or neither.")
+    if req.latitude is None and not req.address.strip():
+        raise HTTPException(422, "An address or a latitude/longitude is required — "
+                                 "a reconstruction with no location is not map-ready.")
+
+    engine = select_engine()
+    if engine is None:
+        raise HTTPException(
+            503,
+            "No reconstruction engine is available on this machine. "
+            + " ".join(e["detail"] for e in engine_status() if not e["available"]))
+
+    asset_id = f"scan-{req.batchId.removeprefix('batch-')[:12].lower()}"
+    job = JOBS.create(address=req.address, assetId=asset_id,
+                      photoCount=sum(1 for _ in photos.iterdir()))
+    jobs.start(JOBS, job.id, photos_dir=photos, address=req.address,
+               asset_root=ASSET_DIR, asset_id=asset_id, engine=engine,
+               latitude=req.latitude, longitude=req.longitude,
+               reference_meters=req.referenceMeters, license_notes=req.licenseNotes)
+    return {"jobId": job.id, "assetId": asset_id, "engine": engine.name}
+
+
+@app.get("/api/jobs/{job_id}")
+def job_status(job_id: str) -> dict:
+    """Poll a reconstruction. When it is done, the asset bundle comes with it."""
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(400, "Invalid job id.")
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "No such job.")
+    payload = job.as_dict()
+    if job.status == "done":
+        placement_file = ASSET_DIR / job.assetId / "placement.json"
+        if placement_file.exists():
+            payload["asset"] = _bundle(validate_document(json.loads(placement_file.read_text())))
+    return payload
+
+
+@app.get("/api/jobs")
+def job_list() -> dict:
+    return {"jobs": JOBS.list()}
 
 
 @app.post("/api/export")

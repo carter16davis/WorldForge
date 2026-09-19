@@ -52,6 +52,23 @@
 
       <div class="intake" id="intake" hidden></div>
 
+      <div class="reconstruct" id="reconstruct-panel" hidden>
+        <button type="button" id="reconstruct-btn">Reconstruct this building</button>
+        <p class="hint" id="reconstruct-hint"></p>
+        <div class="job" id="job" hidden>
+          <div class="job-head">
+            <span id="job-stage">queued</span>
+            <span id="job-pct">0%</span>
+          </div>
+          <div class="job-bar"><i id="job-fill"></i></div>
+          <p class="job-detail" id="job-detail"></p>
+          <details class="job-log">
+            <summary>Log</summary>
+            <pre id="job-log"></pre>
+          </details>
+        </div>
+      </div>
+
       <details class="prepared">
         <summary>Use a prepared World Cup venue</summary>
         <select id="venue-select" aria-label="Prepared venue"></select>

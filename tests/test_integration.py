@@ -20,14 +20,26 @@ def client(tmp_path, monkeypatch):
 
 
 def test_capabilities_report_what_is_actually_wired(client):
-    """The strip is the app's own honesty check. Geocoding and packaging are in
-    the repo and always work; reconstruction needs RealityScan and usually is
-    not there, and saying so is the point."""
+    """The strip is the app's own honesty check, so it must track this machine
+    rather than a value baked into a test. Whether RealityScan is installed
+    differs between a developer's laptop and CI; what must not differ is that
+    the strip agrees with `/api/engines`."""
+    from reconstruction.engine import engine_status
+
     caps = {c["name"]: c for c in client.get("/api/session").json()["capabilities"]}
     assert caps["Geocoding"]["wired"] is True
     assert caps["Export packaging"]["wired"] is True
-    assert caps["Reconstruction"]["wired"] is False
-    assert "prepared" in caps["Reconstruction"]["detail"].lower()
+
+    usable = [e for e in engine_status() if e["available"]]
+    assert caps["Reconstruction"]["wired"] is bool(usable)
+    if usable:
+        assert caps["Reconstruction"]["provider"] == usable[0]["name"]
+        assert "Reconstruct" in caps["Reconstruction"]["detail"]
+    else:
+        assert "prepared" in caps["Reconstruction"]["detail"].lower()
+
+    served = client.get("/api/engines").json()
+    assert served["canReconstruct"] is bool(usable)
 
 
 def test_place_then_export_writes_real_files(client):

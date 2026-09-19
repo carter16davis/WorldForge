@@ -172,15 +172,17 @@ async function handleFiles(fileList) {
   toast(`Analysing ${files.length} file${files.length > 1 ? "s" : ""}…`);
   try {
     const report = await api.upload(files, $("address-input").value);
-    update({ intake: report }, "intake");
-
-    if (report.asset) {
-      applyBundle(report.asset, "reconstructed");
-      await loadAsset();
-      toast("Reconstruction complete.", "ok");
-    } else if (report.fallback) {
-      toast(report.fallback, "warn");
-    }
+    update({
+      intake: report,
+      batchId: report.batchId,
+      engines: report.engines || [],
+      job: null,
+    }, "intake");
+    toast(`Analysed ${report.totalCount} file(s). ` +
+          (report.canReconstruct
+            ? "Enter the address, then reconstruct."
+            : "No reconstruction engine on this machine — see the note below."),
+          report.canReconstruct ? "ok" : "warn");
 
     const gps = report.files.find((f) => f.gps);
     if (gps && !$("address-input").value.trim()) {
@@ -192,6 +194,88 @@ async function handleFiles(fileList) {
   } finally {
     update({ busy: false }, "busy");
   }
+}
+
+/* ─────────────────────── reconstruction job ─────────────────────── */
+
+async function startReconstruction() {
+  if (!state.batchId) return;
+  const address = $("address-input").value.trim();
+  if (!address) {
+    toast("Enter the building's address first. A mesh with nowhere to go is not " +
+          "map-ready, and reconstruction takes minutes — better to fail now.", "warn");
+    $("address-input").focus();
+    return;
+  }
+  try {
+    const { jobId } = await api.reconstruct({ batchId: state.batchId, address });
+    update({ job: { id: jobId, status: "queued", progress: 0, stage: "queued", log: [] } }, "job");
+    pollJob(jobId);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+/* Polls until the job settles. Backs off while the slow stage runs, because a
+   reconstruction is minutes long and a one-second poll for ten minutes is just
+   noise in the log. */
+async function pollJob(jobId) {
+  let delay = 1000;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, delay));
+    let job;
+    try {
+      job = await api.job(jobId);
+    } catch (err) {
+      update({ job: { ...state.job, status: "failed", error: err.message } }, "job");
+      toast(`Lost contact with the job: ${err.message}`, "error");
+      return;
+    }
+    update({ job }, "job");
+
+    if (job.status === "done") {
+      if (job.asset) {
+        applyBundle(job.asset, "reconstructed");
+        await loadAsset();
+      }
+      toast("Reconstruction complete. This model is measured from your photos — " +
+            "check heading and scale before exporting.", "ok");
+      return;
+    }
+    if (job.status === "failed") {
+      toast(job.error || "Reconstruction failed.", "error");
+      return;
+    }
+    delay = job.stage === "reconstruct" ? 5000 : 1500;
+  }
+}
+
+function renderReconstruct(s) {
+  const panel = $("reconstruct-panel");
+  const button = $("reconstruct-btn");
+  const hint = $("reconstruct-hint");
+  if (!s.batchId) { panel.hidden = true; return; }
+  panel.hidden = false;
+
+  const usable = (s.engines || []).find((e) => e.available);
+  const running = s.job && (s.job.status === "queued" || s.job.status === "running");
+  button.disabled = !usable || running;
+  button.textContent = running ? "Reconstructing…" : "Reconstruct this building";
+
+  hint.textContent = usable
+    ? `${usable.name}: ${usable.detail}`
+    : "No reconstruction engine here. " +
+      (s.engines || []).map((e) => `${e.name} — ${e.detail}`).join("  ");
+
+  const host = $("job");
+  if (!s.job) { host.hidden = true; return; }
+  host.hidden = false;
+  host.dataset.status = s.job.status;
+  $("job-stage").textContent = s.job.stage || s.job.status;
+  $("job-pct").textContent = `${Math.round((s.job.progress || 0) * 100)}%`;
+  $("job-fill").style.width = `${Math.round((s.job.progress || 0) * 100)}%`;
+  $("job-detail").textContent = s.job.error || s.job.detail || "";
+  $("job-log").textContent = (s.job.log || []).slice(-40).join("\n");
 }
 
 function editTransform(patch) {
@@ -264,6 +348,7 @@ function bindControls() {
     dropzone.addEventListener(type, (e) => { e.preventDefault(); dropzone.classList.remove("is-over"); });
   }
   dropzone.addEventListener("drop", (e) => handleFiles(e.dataTransfer.files));
+  $("reconstruct-btn").addEventListener("click", startReconstruction);
 
   $("address-form").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -349,6 +434,7 @@ function render(s, reason) {
   }
   if (reason === "resolved") renderResolved(s.resolved);
   if (reason === "intake") renderIntake(s.intake);
+  if (reason === "intake" || reason === "job") renderReconstruct(s);
   if (reason === "transform") renderFacts(s);
   renderProblems(s.problems);
   $("world-uri").textContent = s.worldforgeUri || "worldforge://…";

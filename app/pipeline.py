@@ -1,14 +1,18 @@
-"""The seam between the viewer and the reconstruction pipeline.
+"""The seam between the viewer and the rest of the pipeline.
 
 Geocoding (`app.geocode`) and packaging (`app.export`) are always present, so
 they are called directly. Reconstruction is not: it drives RealityScan, a
-Windows desktop application, and on a machine without it the app must still run
-the whole prepared path end to end. So reconstruction alone is probed at call
-time, and `capabilities()` reports honestly whether it answered.
+Windows desktop application, or whatever external command is configured, and on
+a machine with neither the app must still run the prepared path end to end. So
+`capabilities()` asks `reconstruction.engine` what can actually run here.
 
-The UI shows that report in a status strip. Nobody has to ask "is the real
-pipeline wired up yet?" — the app says so on screen, and says which of the two
-things you are looking at: a measured reconstruction, or a prepared asset.
+The UI shows that report in a status strip. Nobody has to ask "can this thing
+actually reconstruct?" — the app says so on screen, and says which of the two
+things you are looking at: a model measured from photographs, or the prepared
+footprint extrusion.
+
+Reconstruction itself does not happen here. It takes minutes, so it runs as a
+background job: see `reconstruction/jobs.py` and `POST /api/reconstruct`.
 
 Contract for the reconstruction module: see docs/INTEGRATION.md.
 """
@@ -17,7 +21,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,13 +28,7 @@ from typing import Any, Callable
 
 from app import geocode as _geocode
 from app import geohash
-from app.contracts import (
-    CoverageReport,
-    Placement,
-    Transform,
-    normalize_placement,
-    validate_placement,
-)
+from app.contracts import CoverageReport, Placement, Transform
 
 log = logging.getLogger("worldforge.pipeline")
 
@@ -75,20 +72,27 @@ def _reconstruction():
 
 def capabilities() -> list[dict]:
     """What is actually wired right now. Re-checked on every call, so installing
-    RealityScan and restarting shows up on a page refresh."""
+    RealityScan and refreshing the page is enough to see it appear."""
+    from reconstruction.engine import engine_status
+
     recon, name = _reconstruction()
-    recon_fn = _attr(recon, "reconstruct", "build_asset")
     cov_fn = _attr(recon, "coverage_report", "analyze_coverage")
 
+    backends = engine_status()
+    usable = next((e for e in backends if e["available"]), None)
+
     return [
-        Capability("Reconstruction", bool(recon_fn),
-                   name if recon_fn else "prepared asset",
-                   "RealityScan photogrammetry, anchored to the geocoded address." if recon_fn
-                   else "Using the prepared venue asset — uploads are analysed but not reconstructed.").as_dict(),
+        Capability("Reconstruction", usable is not None,
+                   usable["name"] if usable else "prepared asset",
+                   f'{usable["detail"]} Upload photos, enter the address, then '
+                   f'press Reconstruct.' if usable
+                   else "No engine here, so uploads are analysed but not reconstructed. "
+                        + " ".join(e["detail"] for e in backends)).as_dict(),
         Capability("Coverage agent", bool(cov_fn),
                    name if cov_fn else "built-in",
                    "Per-facade coverage from the reconstruction's own camera poses." if cov_fn
-                   else "Built-in intake checks (EXIF, blur, duplicates) plus the prepared report.").as_dict(),
+                   else "Built-in intake checks (EXIF, blur, duplicates). Per-facade "
+                        "coverage needs camera poses the export does not include.").as_dict(),
         Capability("Geocoding", True, "nominatim + venue table",
                    "Prepared venue table first, then OpenStreetMap Nominatim.").as_dict(),
         Capability("Export packaging", True, "built-in",
@@ -327,32 +331,6 @@ def _intake_notes(files: list[dict], usable: list[dict], located: list[dict]) ->
     if any("Near-duplicate" in i for f in files for i in f["issues"]):
         notes.append("Burst-mode duplicates detected; they add processing time without adding parallax.")
     return notes
-
-
-def reconstruct(paths: list[Path], address: str) -> Placement | None:
-    """Hand off to the reconstruction module. Returns None when it is not wired
-    on this machine, which the caller reports as 'falling back to the prepared
-    asset'. See docs/INTEGRATION.md for why that is the normal case."""
-    recon, name = _reconstruction()
-    fn = _attr(recon, "reconstruct", "build_asset")
-    if not fn:
-        return None
-    try:
-        raw = fn([str(p) for p in paths], address)
-        if raw is None:
-            return None
-        if isinstance(raw, (str, Path)):
-            raw = json.loads(Path(raw).read_text())
-        elif not isinstance(raw, dict):
-            raw = getattr(raw, "placement", None) or raw.__dict__
-        placement = normalize_placement(raw)
-        problems = validate_placement(placement)
-        if problems:
-            log.warning("%s produced a placement with problems: %s", name, problems)
-        return placement
-    except Exception as exc:
-        log.warning("%s reconstruction failed (%s); using the prepared asset", name, exc)
-        return None
 
 
 def media_fingerprint(paths: list[Path]) -> str:

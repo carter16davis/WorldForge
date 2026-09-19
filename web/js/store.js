@@ -18,6 +18,9 @@ export const state = {
   venues: [],
   resolved: null,       // last geocode result
   intake: null,         // last upload report
+  batchId: null,        // uploaded batch awaiting reconstruction
+  engines: [],          // reconstruction backends and why they can or cannot run
+  job: null,            // running or finished reconstruction job
   era: 0,               // 0 = 2026, 1 = 2426
   coverageShading: false,
   busy: false,

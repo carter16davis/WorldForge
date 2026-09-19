@@ -45,27 +45,75 @@ and the app falls back to the prepared asset.
 
 | Name | Signature | Present today |
 | --- | --- | --- |
-| `analyse_media` | `(paths: list[str]) -> dict` | yes |
 | `anchor_model` | see below | yes |
-| `reconstruct` | `(paths: list[str], address: str) -> dict \| None` | **no** |
 | `coverage_report` | `(asset_id: str) -> dict` | **no** |
 
-The last two are deliberately undefined rather than stubbed. `reconstruct` would
-have to drive RealityScan, a Windows desktop application that requires a human to
-isolate the subject between alignment and meshing; `coverage_report` would need
-camera poses the current export does not include. A stub returning `None` or
-zeros makes the capability strip read green for something that never works, which
-is worse than an honest red.
+`coverage_report` is deliberately undefined rather than stubbed: per-facade
+coverage needs camera poses the reconstruction export does not include, and a
+stub returning zeros makes the capability strip read green for something that
+never works. A real scan's `coverage.json` therefore carries the counts that
+*were* measured and an empty `facades` list.
 
-### `analyse_media` result
+Reconstruction itself is not a function call. It takes minutes, so it runs as a
+background job.
 
-```json
-{
-  "files": [{"name": "", "kind": "photo|video|other", "issues": [], "sizeBytes": 0}],
-  "usableCount": 0, "totalCount": 0, "geotaggedCount": 0,
-  "notes": [], "provider": ""
-}
+## Reconstruction jobs
+
 ```
+POST /api/upload       photos + address  ->  { batchId, files[], engines[], canReconstruct }
+POST /api/reconstruct  { batchId, address | latitude+longitude, referenceMeters? }
+                                         ->  { jobId, assetId, engine }
+GET  /api/jobs/{id}    ->  { status, stage, progress, detail, log[], asset? }
+GET  /api/engines      ->  { engines[], canReconstruct }
+```
+
+An upload batch is kept on disk under `uploads/batch-*/photos/`, because the job
+re-reads the originals. It used to be deleted at the end of the upload request,
+which is why nothing could ever be reconstructed from it.
+
+`POST /api/reconstruct` requires a location and refuses without one (422). A mesh
+with nowhere to go is not map-ready, and discovering an unresolvable address
+after ten minutes of photogrammetry is worse than discovering it immediately.
+With no engine available it returns 503 rather than handing back the prepared
+asset.
+
+Job stages, and roughly what each costs:
+
+| Stage | Share | What it does |
+| --- | --- | --- |
+| `analyse` | 4% | blur, exposure, exact duplicates, EXIF, SHA-256 per photo |
+| `geocode` | 1% | address to coordinates |
+| `reconstruct` | 85% | the engine |
+| `anchor` | 7% | ground, isolation, scale, heading, re-origin |
+| `publish` | 3% | write the asset where the viewer loads it |
+
+Job state lives in `uploads/jobs/<id>/job.json`, not in memory, so a restart
+leaves a record. A job left `running` by a restart is marked failed when the
+store reloads — a running job with no thread behind it would poll forever.
+
+## Engines
+
+`reconstruction/engine.py` exposes `engine_status()` and `select_engine()`.
+
+**RealityScan** is found via `RealityScan.exe` on PATH or under
+`%ProgramFiles%/Epic Games/RealityScan*/`. From WSL it is launched through
+interop with `wslpath` translation. The web app runs it unattended with
+`-setReconstructionRegionAuto` and records `regionMode: "automatic"` in
+provenance; for a hand-placed region use the interactive `prepare`/`build` CLI.
+
+**External command** runs `WORLDFORGE_RECONSTRUCTION_CMD`, which must contain
+`{photos}` and `{output}` and write `{output}/building.glb`. It is split with
+`shlex` and run without a shell. This is the hook for COLMAP, Meshroom or a
+cloud service, and it is what makes the job pipeline testable on a machine with
+no RealityScan — see `tests/test_jobs.py`.
+
+Environment:
+
+| Variable | Effect |
+| --- | --- |
+| `WORLDFORGE_RECONSTRUCTION_CMD` | external engine command template |
+| `WORLDFORGE_WIN_WORK_ROOT` | where to stage photos so Windows sees a drive path, not a UNC path |
+| `WORLDFORGE_RECONSTRUCTION_STALL_S` | kill a run that reports no progress for this long (default 1800) |
 
 ### `anchor_model`
 

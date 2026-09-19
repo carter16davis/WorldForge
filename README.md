@@ -25,19 +25,69 @@ adjust heading, scale and vertical offset, then export a ZIP.
 .venv/bin/python -m pytest -q
 ```
 
+## Reconstructing a building from photos
+
+1. Drop 20+ photos taken while walking right around the building, with 60–80%
+   overlap between consecutive frames.
+2. Enter the address. This is required before reconstruction starts, not after:
+   a mesh with nowhere to go is not map-ready, and finding that out *after* ten
+   minutes of photogrammetry is worse than finding out immediately.
+3. Press **Reconstruct this building**, and watch the stages:
+   `analyse → geocode → reconstruct → anchor → publish`.
+
+The result is a model measured from your photographs, anchored to the geocoded
+coordinate, grounded, re-origined and ready to export.
+
+### Engines
+
+| Engine | When it runs |
+| --- | --- |
+| **RealityScan** | Found automatically on Windows, or under WSL via `wslpath`. Runs unattended with an automatic reconstruction region. |
+| **External command** | Whatever you put in `WORLDFORGE_RECONSTRUCTION_CMD`. |
+
+```sh
+export WORLDFORGE_RECONSTRUCTION_CMD='mytool --in {photos} --out {output}'
+```
+
+The command must write `{output}/building.glb`. That hook is the answer for
+COLMAP, Meshroom or a cloud service: WorldForge does not ship drivers for those,
+because an untested driver for a tool the author never ran is worse than a
+documented hole.
+
+`GET /api/engines` says which are available and why the others are not, and the
+app shows that sentence rather than failing silently. If nothing is available,
+`POST /api/reconstruct` returns 503 — it does not quietly hand back the prepared
+asset and call it a reconstruction.
+
+### The unattended trade-off
+
+The CLI's `prepare` / `build` commands stop between alignment and meshing so you
+can place the reconstruction region by hand, which excludes far more of the
+surroundings. The web app cannot stop for that, so it runs with
+`-setReconstructionRegionAuto` and records `regionMode: "automatic"` in
+`provenance.json`. Cleaning up what the automatic region kept is what
+`reconstruction/anchor.py`'s isolation step is for.
+
+Under WSL, `wslpath -w` produces a `\\wsl.localhost\...` UNC path, which
+RealityScan handles inconsistently. Jobs are therefore staged onto the Windows
+filesystem first; set `WORLDFORGE_WIN_WORK_ROOT` if the guess is wrong.
+
 ## What is real and what is prepared
 
 The capability strip along the top of the app says so on screen, and it is not
 decorative — it reflects what actually answered on this machine.
 
 - **Geocoding** and **export packaging** are always wired.
-- **Reconstruction** requires RealityScan, a Windows desktop application, and a
-  human to isolate the subject mid-scan. It is not driven from the web app, so
-  the strip reads "prepared asset" and uploads are analysed rather than
-  reconstructed.
+- **Reconstruction** is wired when an engine is available; the strip names it.
+  With none, uploads are analysed but not reconstructed, and the strip says so.
 - The prepared demo GLB is **extruded from an OpenStreetMap footprint with an
   estimated height**, not reconstructed from photographs. `provenance.json` says
-  exactly that.
+  exactly that. Anything you reconstruct yourself is a separate asset and is
+  *not* labelled that way.
+- **Per-facade coverage is not reported for a real scan.** It needs the camera
+  poses, which the reconstruction export does not include, so `coverage.json`
+  carries the photo counts that were measured and an empty `facades` list rather
+  than four invented rows.
 - Coverage colours in the demo are illustrative, and the legend labels them.
 - The 2426 export carries identical geometry, coordinates and scale to the 2026
   export; the treatment is applied in the viewer and `provenance.json` records it.
