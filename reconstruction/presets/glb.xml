@@ -1,0 +1,5 @@
+<?xml version='1.0' encoding='utf-8'?>
+<ModelExport exportBinary="1" exportInfoFile="1" exportVertices="1" exportVertexColors="0" exportVertexColorSpace="0" exportVertexNormals="0" exportTriangles="1" exportTriangleStrips="0" meshColor="1 1 1" tileType="1" exportTextureAlpha="0" exportToOneTexture="0" embedTextures="1" shrinkTextures="0" oneTextureMaxSide="8192" oneTextureUsePow2TexSide="1" exportCoordinateSystemType="0" settingsAnchor="0 0 0" settingsRotation="0 0 0" settingsScale="1 1 1" normalSpace="2" normalRange="0" normalFlip="0 0 0" formatAndVersionUID="glb 000 " exportModelByParts="0" exportRandomPartColor="0" exportCameras="0" exportCamerasAsModelPart="0" exportMaterials="0" numberAsciiFormatting="5" authorComment="" exportedLayerCount="1" classificationLayer="-1" moreDetails="">
+  <Header magic="5786949" version="6" />
+  <Layer0 type="1" textureLayerIndex="0" textureWicContainerFormat="{1B7CFAF4-713F-473C-BBCD-6137425FAEAF}" textureWicPixelFormat="{6FDDC324-4E03-4BFE-B185-3D77768DC90F}" textureExtension="png" mapQualityToColor="0" />
+</ModelExport>
