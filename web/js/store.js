@@ -12,8 +12,10 @@ export const state = {
   cells: [],
   provenance: {},
   problems: [],
-  modelUrl: null,
+  modelUrl: null,      // the full-resolution export model
+  previewUrl: null,    // what the viewer loads: the resampled copy when there is one
   worldforgeUri: "",
+  assets: [],          // every model published under web/assets, newest first
   capabilities: [],
   venues: [],
   resolved: null,       // last geocode result
@@ -53,6 +55,7 @@ export function applyBundle(bundle, reason = "asset") {
     provenance: bundle.provenance || {},
     problems: bundle.problems || [],
     modelUrl: bundle.modelUrl,
+    previewUrl: bundle.previewUrl || bundle.modelUrl,
     worldforgeUri: bundle.worldforgeUri || "",
   }, reason);
 }

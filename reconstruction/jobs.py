@@ -37,6 +37,11 @@ STAGES = ('extract', 'analyse', 'geocode', 'reconstruct', 'anchor', 'publish')
 STAGE_WEIGHT = {'extract': 0.06, 'analyse': 0.04, 'geocode': 0.01,
                 'reconstruct': 0.79, 'anchor': 0.07, 'publish': 0.03}
 
+# The anchor steps the placement editor actually has a control for. An unsolved
+# ground plane or isolation is real and worth reporting, but "set it in the
+# editor" sends the user looking for a dial that is not there.
+EDITOR_CONTROLS = ('heading', 'scale', 'verticalOffset')
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
@@ -153,6 +158,7 @@ def run_job(store, job_id, source_dir, address, *, asset_root, asset_id,
     from . import anchor as anchoring
     from . import engine as engines
     from . import media as media_module
+    from . import optimize
     from .pipeline import intake
 
     source_dir = Path(source_dir)
@@ -223,25 +229,49 @@ def run_job(store, job_id, source_dir, address, *, asset_root, asset_id,
         raw, latitude, longitude, asset_id=asset_id, name=address or asset_id,
         address=address, osm_footprint=osm_footprint,
         reference_meters=reference_meters, out_dir=anchored,
+        # The engine knows what frame it writes; anchoring measures everything
+        # along that axis, so a wrong answer here lays the building on its side.
+        up_axis=getattr(engine, 'up_axis', 'Y'),
     )
     report = result['report']
     unresolved = report.get('unresolved') or []
+    editable = [name for name in unresolved if name in EDITOR_CONTROLS]
+    other = [name for name in unresolved if name not in EDITOR_CONTROLS]
     note('anchor',
-         'Anchored. ' + (f'Unsolved: {", ".join(unresolved)} — set these in the editor.'
-                         if unresolved else 'Scale and heading solved from the footprint.'),
+         'Anchored. ' + ' '.join(filter(None, [
+             f'Unsolved: {", ".join(editable)} — set these in the editor.' if editable else '',
+             f'{", ".join(other)} could not be solved; see the anchor report.' if other else '',
+             '' if unresolved else 'Scale and heading solved from the footprint.',
+         ])),
          1.0)
 
     # --- publish -----------------------------------------------------------
+    # The asset is written where the viewer can load it and where it stays: a
+    # reconstruction that exists only in the tab that started it is not saved.
     note('publish', 'Writing the asset for the viewer.')
     destination = Path(asset_root) / asset_id
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(anchored / 'building.glb', destination / 'building.glb')
 
     placement = result['placement']
+
+    # A RealityScan export carries an 8192x8192 atlas: 40 MB of PNG that the
+    # export should keep and a browser should never be asked to download. The
+    # viewer gets a resampled copy of the same geometry; see reconstruction.optimize.
+    note('publish', 'Resampling the texture for the viewer.', 0.4)
+    web = optimize.publish_web_model(
+        destination / 'building.glb', destination / 'building-lod.glb')
+    if web:
+        placement.setdefault('models', {})['low'] = 'building-lod.glb'
+        note('publish',
+             f'Web model is {web["bytes"] / 1e6:.1f} MB against '
+             f'{web["sourceBytes"] / 1e6:.1f} MB for the export.', 0.7)
+
     (destination / 'placement.json').write_text(json.dumps(placement, indent=2) + '\n')
 
     provenance.update({
         'reconstructionTool': engine.name,
+        'webModel': web,
         'mediaSummary': media.as_dict(),
         'regionMode': 'automatic',
         'regionNote': (
@@ -294,9 +324,18 @@ def _coverage_from_intake(asset_id, confidence, anchor_report, media=None):
             f'{len(flagged)} photo(s) flagged for blur or exposure. Re-shoot those '
             f'angles rather than deleting them blind.')
     for name in unresolved:
-        recommendations.append(
-            f'{name} could not be solved from the evidence — set it in the '
-            f'placement editor, or supply a reference footprint or measurement.')
+        if name in EDITOR_CONTROLS:
+            recommendations.append(
+                f'{name} could not be solved from the evidence — set it in the '
+                f'placement editor, or supply a reference footprint or measurement.')
+        else:
+            # Not everything the anchor cannot solve is a dial the user can turn.
+            # Telling them to fix the ground plane in the placement editor sends
+            # them looking for a control that does not exist.
+            recommendations.append(
+                f'{name} could not be solved from the evidence. The anchor report '
+                f'in provenance.json says what was measured and why it was not '
+                f'enough; the usual fix is a better capture, not an adjustment.')
     recommendations.append(
         'Per-facade coverage is not reported: it needs camera poses that the '
         'reconstruction export does not currently include.')

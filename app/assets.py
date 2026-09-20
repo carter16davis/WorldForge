@@ -12,6 +12,7 @@ from measured data rather than invented — the provenance file says exactly tha
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,95 @@ Every consumer of `building.glb` gets Y-up metres with north at -Z.
 Photogrammetry and GIS tools emit raw ENU (+Z up); `import_mesh` applies this on
 the way in, and `reconstruction.anchor` bakes it into the asset it writes.
 """
+
+
+ASSET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+"""What may name a directory under `web/assets`. An assetId reaches this module
+from a URL path, so it is matched in full before it is ever joined to a path."""
+
+
+def asset_dir(asset_id: str) -> Path:
+    """The directory holding one published asset. Raises on anything that could
+    escape `ASSET_DIR` — `..`, a slash, a leading dot."""
+    if not ASSET_ID.fullmatch(asset_id or ""):
+        raise ValueError(f"{asset_id!r} is not a valid asset id")
+    return ASSET_DIR / asset_id
+
+
+def published_assets() -> list[dict]:
+    """Every asset on disk under `web/assets`, newest first.
+
+    A reconstruction is written here by `reconstruction.jobs` and stays here. The
+    job that made it is a transient thing — the browser tab that started it polls
+    until it finishes and then has the bundle — but the asset outlives both, so
+    the app has to be able to find it again on the next page load. Without this
+    the demo can only ever show you the model you just made, and a reload loses
+    ten minutes of photogrammetry to a directory nobody reads.
+
+    Cards only: enough to list and pick an asset. `GET /api/assets/{id}` returns
+    the full bundle for the one that gets picked.
+    """
+    if not ASSET_DIR.is_dir():
+        return []
+
+    cards = []
+    for directory in ASSET_DIR.iterdir():
+        placement_file = directory / "placement.json"
+        if not directory.is_dir() or not placement_file.is_file():
+            continue
+        try:
+            placement = json.loads(placement_file.read_text())
+        except (OSError, ValueError):
+            continue          # a half-written asset is not a reason to fail the list
+
+        model = directory / (placement.get("models", {}).get("high") or "building.glb")
+        provenance = _read_json(directory / "provenance.json")
+        report = provenance.get("anchorReport") or {}
+        location = placement.get("location") or {}
+        tool = provenance.get("reconstructionTool", "")
+
+        # `reconstruction.anchor` writes no spatial index — `validate_document`
+        # derives one on the way in, and this listing does not go through it. The
+        # cell follows the coordinates, so deriving it here is the same answer,
+        # not a second source of truth.
+        index = placement.get("spatialIndex") or {}
+        cell = index.get("cell") or ""
+        if not cell and location.get("latitude") is not None:
+            cell = geohash.encode(location["latitude"], location["longitude"],
+                                  index.get("precision") or 8)
+
+        cards.append({
+            "assetId": placement.get("assetId", directory.name),
+            "name": placement.get("name") or directory.name,
+            "sourceAddress": placement.get("sourceAddress", ""),
+            "latitude": location.get("latitude"),
+            "longitude": location.get("longitude"),
+            "cell": cell,
+            "reconstructionTool": tool,
+            # The distinction the capability strip makes, per asset: measured
+            # from photographs, or extruded from a footprint for the demo.
+            "kind": "prepared" if "footprint-extrusion" in tool else "scan",
+            "photoCount": len(provenance.get("sourceMedia") or []),
+            "unresolved": report.get("unresolved") or [],
+            "dimensions": placement.get("dimensions") or {},
+            "modelBytes": model.stat().st_size if model.is_file() else 0,
+            "hasModel": model.is_file(),
+            "createdAt": provenance.get("generatedAt", ""),
+            "updatedAt": datetime.fromtimestamp(
+                placement_file.stat().st_mtime, tz=timezone.utc).isoformat(timespec="seconds"),
+            "thumbnailUrl": (f"/assets/{directory.name}/thumbnail.webp"
+                             if (directory / "thumbnail.webp").is_file() else None),
+        })
+
+    return sorted(cards, key=lambda c: c["updatedAt"], reverse=True)
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        loaded = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 @dataclass

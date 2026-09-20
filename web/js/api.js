@@ -29,6 +29,8 @@ const postJson = (path, payload) =>
 
 export const api = {
   session: () => request("/api/session"),
+  assets: () => request("/api/assets"),
+  asset: (id) => request(`/api/assets/${encodeURIComponent(id)}`),
   geocode: (address) => postJson("/api/geocode", { address }),
   place: (body) => postJson("/api/place", body),
   validate: (placement) => postJson("/api/validate", { placement }),

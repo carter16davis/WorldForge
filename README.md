@@ -39,6 +39,21 @@ adjust heading, scale and vertical offset, then export a ZIP.
 The result is a model measured from your own media, anchored to the geocoded
 coordinate, grounded, re-origined and ready to export.
 
+### Where it goes
+
+A finished reconstruction is written to `web/assets/<asset-id>/` and stays
+there. **Saved models** at the top of the rail lists everything published on
+this machine, newest first, and opening one loads its model, placement and
+provenance — so a reconstruction survives a page reload, a server restart and
+the browser tab that started it. `GET /api/assets` is the same list.
+
+Each asset is published twice. `building.glb` is the full-resolution model and
+is what the export packages. `building-lod.glb` is the same geometry with the
+texture atlas resampled for a browser, and is what the viewer loads; RealityScan
+textures a model with a single 8192×8192 atlas, which is 40 MB of PNG and a
+quarter of a gigabyte of video memory. `provenance.json` records the resampling.
+Geometry is identical in both — see `reconstruction/optimize.py`.
+
 ### Video
 
 An uploaded video is sampled into stills before reconstruction. Sampling is by
@@ -64,10 +79,18 @@ in its recommendations rather than leaving you to wonder why the mesh is soft.
 
 ### Engines
 
-| Engine | When it runs |
-| --- | --- |
-| **RealityScan** | Found automatically on Windows, or under WSL via `wslpath`. Runs unattended with an automatic reconstruction region. |
-| **External command** | Whatever you put in `WORLDFORGE_RECONSTRUCTION_CMD`. |
+| Engine | When it runs | Export frame |
+| --- | --- | --- |
+| **RealityScan** | Found automatically on Windows, or under WSL via `wslpath`. Runs unattended with an automatic reconstruction region. | Z-up |
+| **External command** | Whatever you put in `WORLDFORGE_RECONSTRUCTION_CMD`. | Y-up, or `WORLDFORGE_RECONSTRUCTION_UP_AXIS=Z` |
+
+The export frame is not cosmetic. Every measurement `reconstruction/anchor.py`
+makes is taken along the up axis — the ground plane is the lowest dense band
+along it, bodies are ranked by how high they reach, the footprint is the
+silhouette cast down it. RealityScan writes its own Z-up survey frame whatever
+the container convention says, and anchoring one of its exports as Y-up turns a
+stadium into a 79 × 12 m slab standing 38 m tall. Each engine declares its
+frame; the anchor report's `upAxis` step says whether the geometry agrees.
 
 ```sh
 export WORLDFORGE_RECONSTRUCTION_CMD='mytool --in {photos} --out {output}'
@@ -92,6 +115,16 @@ surroundings. The web app cannot stop for that, so it runs with
 `provenance.json`. Cleaning up what the automatic region kept is what
 `reconstruction/anchor.py`'s isolation step is for.
 
+That step drops *sheets* unconditionally — the ground plane under the capture
+and the backdrop stitched behind it, a few enormous triangles each. Beyond
+that, what it does depends on how the scan split. A clean capture yields a
+handful of bodies and the tallest substantial one is the building. A scan in
+hundreds of pieces has no body that is the building, because photogrammetry
+fragmented the subject itself, so every solid piece is kept and the report says
+that nothing but the sheets was removed. Isolation never guesses which fragment
+is "really" the subject: keeping a neighbour's wall is a visible mistake the
+placement editor can work around, and deleting the building is not.
+
 Under WSL, `wslpath -w` produces a `\\wsl.localhost\...` UNC path, which
 RealityScan handles inconsistently. Jobs are therefore staged onto the Windows
 filesystem first; set `WORLDFORGE_WIN_WORK_ROOT` if the guess is wrong.
@@ -113,6 +146,9 @@ decorative — it reflects what actually answered on this machine.
   carries the photo counts that were measured and an empty `facades` list rather
   than four invented rows.
 - Coverage colours in the demo are illustrative, and the legend labels them.
+- The model the viewer shows for a scan is the **resampled** one. Its geometry
+  is identical to the export's; only the texture is sampled more coarsely, and
+  `provenance.json` gives both sizes and the resampling factor.
 - The 2426 export carries identical geometry, coordinates and scale to the 2026
   export; the treatment is applied in the viewer and `provenance.json` records it.
 
@@ -123,7 +159,7 @@ decorative — it reflects what actually answered on this machine.
 | `app/` | FastAPI service, placement models, geocoding, export packaging |
 | `web/` | Viewer, map and placement editor. Plain ES modules, no build step |
 | `geospatial/` | Coordinate conventions and placement math. No dependencies, no imports from `app` |
-| `reconstruction/` | Media intake, RealityScan orchestration, and georeferencing |
+| `reconstruction/` | Media intake, RealityScan orchestration, georeferencing, and the browser-sized copy of the result |
 | `docs/INTEGRATION.md` | What each layer hands the next |
 
 ## Reconstruction to placement

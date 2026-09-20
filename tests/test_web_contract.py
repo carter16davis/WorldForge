@@ -52,6 +52,40 @@ def test_reconstruction_panel_is_wired_end_to_end():
         assert call in api, f"api.js is missing {call}"
 
 
+def test_the_saved_model_library_is_wired_end_to_end():
+    """A reconstruction takes minutes and is written to `web/assets`, so the one
+    thing this UI must never do is lose track of one. The library is the only
+    route back to an asset published in an earlier session."""
+    html = _html()
+    main = (WEB / "js" / "main.js").read_text()
+    api = (WEB / "js" / "api.js").read_text()
+
+    for element in ("library", "library-hint", "library-refresh"):
+        assert f'id="{element}"' in html, f"{element} missing from index.html"
+
+    assert "renderLibrary" in main and "openAsset" in main
+    assert "refreshLibrary" in main
+    # The list has to be rebuilt when a job finishes, or the model that was just
+    # made is the one model the library does not know about.
+    assert re.search(r'status === "done"[\s\S]{0,400}refreshLibrary\(\)', main), \
+        "the library is not refreshed when a reconstruction finishes"
+    for call in ("assets:", "asset:"):
+        assert call in api, f"api.js is missing {call}"
+
+
+def test_the_viewer_loads_the_preview_model_and_keeps_its_texture():
+    """Two regressions that each made a real reconstruction unusable on screen:
+    loading the full-resolution 50 MB GLB, and replacing its photogrammetric
+    texture with a flat colour."""
+    main = (WEB / "js" / "main.js").read_text()
+    viewer = (WEB / "js" / "viewer3d.js").read_text()
+    store = (WEB / "js" / "store.js").read_text()
+
+    assert "previewUrl" in store, "store.js drops previewUrl from the bundle"
+    assert "previewUrl || modelUrl" in main, "main.js does not prefer the preview model"
+    assert "obj.material?.map" in viewer, "viewer3d.js does not check for a texture"
+
+
 def test_scripts_only_call_api_paths_the_server_serves():
     served = set(re.findall(r'@app\.(?:get|post)\("(/api/[^"]+)"\)',
                             (WEB.parent / "app" / "main.py").read_text()))

@@ -143,6 +143,13 @@ def oneshot_commands(photos, output, preset, triangles=None):
 class RealityScanEngine:
     name = 'RealityScan'
 
+    up_axis = 'Z'
+    """RealityScan exports in its own survey frame, which is Z-up, whatever the
+    container convention says — a GLB from it is Y-up by the glTF spec and Z-up
+    in fact. `anchor.anchor_model` has to be told, because every measurement it
+    makes is taken along the up axis; anchoring a Z-up scan as Y-up laid a
+    stadium on its side and called the result a 38-metre-tall slab."""
+
     def __init__(self, executable=None, preset=None, triangles=400_000):
         self.executable = executable
         self.preset = Path(preset) if preset else Path(__file__).parent / 'presets/glb.xml'
@@ -283,6 +290,12 @@ def _watch_progress(progress_file, progress, stop):
 
 class ExternalEngine:
     name = 'External command'
+
+    up_axis = os.environ.get('WORLDFORGE_RECONSTRUCTION_UP_AXIS', 'Y').upper()
+    """Y, glTF's own convention, because a command writing a .glb most likely
+    follows it. A tool that writes its GLB in an ENU survey frame instead — as
+    photogrammetry tools tend to — needs WORLDFORGE_RECONSTRUCTION_UP_AXIS=Z, and
+    the anchor report says so when the geometry disagrees with the declaration."""
 
     def __init__(self, template=None):
         self.template = template if template is not None else os.environ.get(

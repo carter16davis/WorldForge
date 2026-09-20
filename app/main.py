@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app import geohash, pipeline
-from app.assets import ASSET_DIR
+from app.assets import ASSET_DIR, asset_dir, published_assets
 from app.contracts import Placement, validate_document, validate_placement
 from app.demo_data import DEMO_ASSET_ID, demo_cells, demo_coverage, ensure_demo_asset
 from app.export import EXPORT_ROOT, package, world_uri, zip_package
@@ -108,9 +108,17 @@ class ReconstructRequest(BaseModel):
 
 def _bundle(placement: Placement) -> dict:
     """Everything the viewer needs for one asset, in one round trip."""
-    asset_dir = ASSET_DIR / placement.assetId
-    provenance_file = asset_dir / "provenance.json"
+    directory = ASSET_DIR / placement.assetId
+    provenance_file = directory / "provenance.json"
     coverage = pipeline.coverage_for(placement, demo_coverage(placement))
+
+    # The export carries the full-resolution model; the browser is given the
+    # resampled one when the publish step managed to make it. Same geometry,
+    # same coordinates — see reconstruction/optimize.py.
+    low = placement.models.low
+    preview = (f"/assets/{placement.assetId}/{low}"
+               if low and (directory / low).is_file()
+               else f"/assets/{placement.assetId}/building.glb")
 
     return {
         "placement": placement.model_dump(),
@@ -119,9 +127,31 @@ def _bundle(placement: Placement) -> dict:
         "provenance": json.loads(provenance_file.read_text()) if provenance_file.exists() else {},
         "problems": validate_placement(placement),
         "modelUrl": f"/assets/{placement.assetId}/building.glb",
+        "previewUrl": preview,
         "thumbnailUrl": f"/assets/{placement.assetId}/thumbnail.webp",
         "worldforgeUri": world_uri(placement),
     }
+
+
+def _placement_on_disk(asset_id: str) -> Placement:
+    """The published placement for an asset, whoever wrote it.
+
+    The prepared venue is built on demand; a reconstruction was written by a job
+    that has since finished, possibly in another browser session or before the
+    last server restart. Both are just a directory under `web/assets`.
+    """
+    if asset_id == DEMO_ASSET_ID:
+        return ensure_demo_asset()
+    try:
+        placement_file = asset_dir(asset_id) / "placement.json"
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not placement_file.is_file():
+        raise HTTPException(404, f"No published asset {asset_id!r}.")
+    try:
+        return validate_document(json.loads(placement_file.read_text()))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(422, f"{asset_id}/placement.json did not load: {exc}") from exc
 
 
 def _load_placement(raw: dict[str, Any]) -> Placement:
@@ -142,17 +172,35 @@ def health() -> dict:
 
 @app.get("/api/session")
 def session() -> dict:
-    """One call on page load: what is wired, the prepared asset, the venue list."""
+    """One call on page load: what is wired, the prepared asset, the venue list.
+
+    `assets` is every model published on this machine, so a reconstruction made
+    in an earlier session is on screen again after a reload rather than stranded
+    in a directory with no route to it.
+    """
     placement = ensure_demo_asset()
     return {
         "capabilities": pipeline.capabilities(),
         "asset": _bundle(placement),
+        "assets": published_assets(),
         "venues": [
             {k: v[k] for k in ("key", "name", "venue", "address", "lat", "lon", "country", "capacity")}
             for v in VENUES
         ],
         "demoAssetId": DEMO_ASSET_ID,
     }
+
+
+@app.get("/api/assets")
+def assets() -> dict:
+    """Every published asset, newest first. Cards only; see `/api/assets/{id}`."""
+    return {"assets": published_assets()}
+
+
+@app.get("/api/assets/{asset_id}")
+def asset(asset_id: str) -> dict:
+    """The full bundle for one published asset, ready for the viewer."""
+    return _bundle(_placement_on_disk(asset_id))
 
 
 @app.post("/api/geocode")
@@ -162,10 +210,13 @@ def geocode(req: GeocodeRequest) -> dict:
 
 @app.post("/api/place")
 def place(req: PlaceRequest) -> dict:
-    """Resolve an address (or explicit coordinates) and move the asset there."""
-    placement = ensure_demo_asset()
-    if req.assetId != placement.assetId:
-        raise HTTPException(404, f"Unknown asset {req.assetId!r}")
+    """Resolve an address (or explicit coordinates) and move the asset there.
+
+    Any published asset, not only the prepared one: a reconstruction lands at the
+    address that was typed before it started, and the whole point of the editor
+    is being able to correct that afterwards.
+    """
+    placement = _placement_on_disk(req.assetId)
 
     if (req.latitude is None) != (req.longitude is None):
         raise HTTPException(422, "Supply both latitude and longitude.")
@@ -341,14 +392,14 @@ def export(req: ExportRequest) -> dict:
     if req.era not in ("2026", "2426"):
         raise HTTPException(422, "era must be '2026' or '2426'.")
 
-    asset_dir = ASSET_DIR / placement.assetId
-    provenance_file = asset_dir / "provenance.json"
+    directory = ASSET_DIR / placement.assetId
+    provenance_file = directory / "provenance.json"
     provenance = json.loads(provenance_file.read_text()) if provenance_file.exists() else {}
     coverage = pipeline.coverage_for(placement, demo_coverage(placement))
 
     try:
         manifest = package(placement, provenance=provenance, coverage=coverage,
-                           era=req.era, source_dir=asset_dir)
+                           era=req.era, source_dir=directory)
     except (ValueError, OSError) as exc:
         raise HTTPException(422, str(exc)) from exc
     manifest["downloadUrl"] = f"/api/export/{placement.assetId}/download?export_id={manifest['exportId']}"

@@ -216,15 +216,35 @@ export class Viewer {
     this.meshes = [];
     root.traverse((obj) => {
       if (!obj.isMesh) return;
-      obj.geometry = obj.geometry.toNonIndexed();
-      obj.geometry.computeVertexNormals();
-      obj.material = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(placement?.appearance?.facadeColor || "#9aa3ad"),
-        roughness: 0.72,
-        metalness: 0.18,
-        vertexColors: false,
-      });
+
+      // A photogrammetric model's whole value is its texture: it is the measured
+      // appearance of the building, and the reason a reconstruction beats a
+      // footprint extrusion. This used to replace every material with a flat
+      // colour unconditionally, which threw that away and rendered a real scan
+      // as a grey blob. So the texture is kept when there is one, and the flat
+      // material is what the untextured prepared extrusion gets.
+      const textured = !!obj.material?.map;
+      if (textured) {
+        obj.material.map.colorSpace = THREE.SRGBColorSpace;
+        obj.material.roughness = 0.9;
+        obj.material.metalness = 0.0;
+        // RealityScan exports no normals, so they have to be computed either
+        // way. On indexed geometry they come out smooth, which is what a
+        // measured surface should look like — and it avoids tripling a
+        // 400,000-triangle mesh to get the faceting the demo box wants.
+        if (!obj.geometry.attributes.normal) obj.geometry.computeVertexNormals();
+      } else {
+        obj.geometry = obj.geometry.toNonIndexed();
+        obj.geometry.computeVertexNormals();
+        obj.material = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(placement?.appearance?.facadeColor || "#9aa3ad"),
+          roughness: 0.72,
+          metalness: 0.18,
+          vertexColors: false,
+        });
+      }
       obj.userData.baseColor = obj.material.color.clone();
+      obj.userData.textured = textured;
       this.meshes.push(obj);
     });
 
@@ -540,7 +560,10 @@ export class Viewer {
     const size = box.getSize(new THREE.Vector3());
     let triangles = 0;
     for (const mesh of this.meshes || []) {
-      triangles += mesh.geometry.attributes.position.count / 3;
+      // Indexed geometry is kept for textured scans, where the position count
+      // is the vertex count and says nothing about the triangle count.
+      const geo = mesh.geometry;
+      triangles += (geo.index ? geo.index.count : geo.attributes.position.count) / 3;
     }
     return {
       widthM: size.x, heightM: size.y, depthM: size.z,
@@ -555,8 +578,14 @@ export class Viewer {
       group.remove(child);
       child.traverse?.((o) => {
         o.geometry?.dispose?.();
-        if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
-        else o.material?.dispose?.();
+        // Textures are not freed by disposing the material that holds them, and
+        // a photogrammetric atlas is tens of megabytes of video memory. Before
+        // scans were textured this leaked nothing; now switching assets a few
+        // times would exhaust a laptop GPU.
+        for (const material of [o.material].flat().filter(Boolean)) {
+          material.map?.dispose?.();
+          material.dispose?.();
+        }
       });
     }
   }

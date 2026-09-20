@@ -76,12 +76,19 @@ def scan_mesh(*, with_clutter: bool = True, notched: bool = True) -> trimesh.Tri
     The building's long axis runs along model +X, which in glTF's frame is east,
     so its model-space bearing is 90 degrees. Everything else about the mesh —
     scale, origin, ground height — is arbitrary, exactly as RealityScan leaves it.
+
+    Every body here is subdivided to photogrammetry-like triangle density. That
+    is not decoration: `anchor.isolate_building` recognises the backdrop sheets
+    an automatic reconstruction region stitches in by how few triangles cover
+    how much area, and a building modelled as twenty-eight huge polygons is a
+    backdrop by that measure — as it should be, and as no reconstructed surface
+    ever is.
     """
     # glTF has -Z pointing north, so the building's own +y (across) maps to -z.
     plan = [(x / METERS_PER_UNIT, -y / METERS_PER_UNIT) for x, y in _plan(notched)]
     body = trimesh.creation.extrude_polygon(
         ShapelyPolygon(plan), height=HEIGHT_M / METERS_PER_UNIT,
-    )
+    ).subdivide().subdivide().subdivide()
     # extrude_polygon builds in the XY plane with +Z up; stand it up glTF-style.
     body.apply_transform(np.array([
         [1.0, 0.0, 0.0, 0.0],
@@ -95,12 +102,13 @@ def scan_mesh(*, with_clutter: bool = True, notched: bool = True) -> trimesh.Tri
 
     # Sidewalk: dense, as photogrammetric ground always is, and the thing that
     # makes the lowest *dense* band the right definition of the ground plane.
-    slab = trimesh.creation.box(extents=[9.0, 0.04, 9.0]).subdivide().subdivide().subdivide()
+    slab = (trimesh.creation.box(extents=[9.0, 0.04, 9.0])
+            .subdivide().subdivide().subdivide().subdivide().subdivide())
     slab.apply_translation([OFFSET_UNITS[0] - 8.0, GROUND_UNITS - 0.02, OFFSET_UNITS[1]])
 
     # A parked car: wide and low. It out-volumes nothing, but a naive "biggest
     # component" rule would still be at risk from the slab, which this outranks.
-    car = trimesh.creation.box(extents=[0.45, 0.15, 0.2])
+    car = trimesh.creation.box(extents=[0.45, 0.15, 0.2]).subdivide().subdivide()
     car.apply_translation([OFFSET_UNITS[0] - 6.0, GROUND_UNITS + 0.075, OFFSET_UNITS[1] + 3.0])
 
     return trimesh.util.concatenate([body, slab, car])
@@ -190,6 +198,61 @@ def test_clutter_is_dropped():
 
     isolation = next(s for s in cluttered["report"]["steps"] if s["name"] == "isolation")
     assert isolation["value"] < 1.0        # something was actually removed
+
+
+def test_a_backdrop_sheet_never_wins_over_the_building():
+    """The bug that published a 23-vertex sliver of MetLife Stadium.
+
+    An automatic reconstruction region stitches the ground under the capture and
+    a backdrop behind it into a handful of enormous triangles. Area is how a body
+    earns consideration in `isolate_building`, so a twenty-triangle plane holding
+    a fifth of the scan's surface outranked 400,000 triangles of actual stadium —
+    and the app published the plane.
+    """
+    building = scan_mesh(with_clutter=False)
+    span = float(np.ptp(building.vertices[:, 0])) * 6
+
+    # Two sheets: the ground under the capture, and a backdrop standing behind
+    # it — few triangles, enormous area, and the backdrop reaches highest.
+    ground_sheet = trimesh.creation.box(extents=[span, 0.001, span])
+    ground_sheet.apply_translation([0.0, GROUND_UNITS, 0.0])
+    backdrop = trimesh.creation.box(extents=[span, span, 0.001])
+    backdrop.apply_translation([0.0, GROUND_UNITS + span / 2, -span / 2])
+
+    scan = trimesh.util.concatenate([building, ground_sheet, backdrop])
+    assert scan.area > building.area * 5          # the sheets dominate by area
+
+    kept, step = anchor.isolate_building(scan, 1, GROUND_UNITS)
+
+    assert step.solved
+    assert "sheet" in step.note.lower()
+    # The building survived, and neither sheet did.
+    assert len(kept.faces) == pytest.approx(len(building.faces), rel=0.05)
+    assert kept.extents[1] < span / 2
+
+
+def test_a_shredded_scan_keeps_every_piece_of_the_building():
+    """Photogrammetry fragments a large subject into hundreds of bodies that are
+    all genuinely part of it, so no one of them is the building. Keeping the
+    biggest, the tallest or the nearest cluster all throw the building away."""
+    pieces = []
+    for i in range(60):
+        angle = i / 60 * 2 * math.pi
+        piece = trimesh.creation.box(extents=[0.8, 0.8, 0.8]).subdivide()
+        piece.apply_translation([math.cos(angle) * 6, 0.4, math.sin(angle) * 6])
+        pieces.append(piece)
+    # The backdrop an automatic reconstruction region stitches in behind it.
+    sheet = trimesh.creation.box(extents=[80.0, 40.0, 0.001])
+    sheet.apply_translation([0.0, 20.0, -30.0])
+    scan = trimesh.util.concatenate([*pieces, sheet])
+
+    kept, step = anchor.isolate_building(scan, 1, 0.0)
+
+    assert step.solved
+    assert step.method == "sheet-rejection"
+    # Every piece of the ring, and not the sheet.
+    assert len(kept.faces) == sum(len(p.faces) for p in pieces)
+    assert kept.vertices[:, 1].max() < 2.0
 
 
 def test_a_tape_measure_beats_a_polygon():
@@ -349,10 +412,15 @@ def test_isolation_does_not_copy_the_texture_once_per_body():
     from PIL import Image
 
     bodies = [trimesh.creation.box(extents=[1.0, 1.0, 1.0 + i / 10.0])
+              .subdivide().subdivide()
               for i in range(40)]
     for i, body in enumerate(bodies):
         body.apply_translation([i * 3.0, 0.0, 0.0])
-    mesh = trimesh.util.concatenate(bodies)
+    # Plus the backdrop sheet an automatic reconstruction region always adds, so
+    # there is something for isolation to actually drop.
+    sheet = trimesh.creation.box(extents=[200.0, 100.0, 0.001])
+    sheet.apply_translation([60.0, 0.0, -40.0])
+    mesh = trimesh.util.concatenate([*bodies, sheet])
     # A PBR material holding a baseColorTexture, which is what loading a
     # RealityScan GLB produces and what makes a per-body copy expensive.
     mesh.visual = trimesh.visual.TextureVisuals(

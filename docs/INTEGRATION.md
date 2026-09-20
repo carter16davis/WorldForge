@@ -67,6 +67,18 @@ GET  /api/jobs/{id}    ->  { status, stage, progress, detail, log[], asset? }
 GET  /api/engines      ->  { engines[], canReconstruct }
 ```
 
+A job's `asset` is available only while the tab that started it is polling. What
+outlives it is the directory under `web/assets`:
+
+```
+GET  /api/assets       ->  { assets[] }   cards, newest first
+GET  /api/assets/{id}  ->  the same bundle shape as /api/session's `asset`
+POST /api/place        ->  works for any published asset, not only the prepared one
+```
+
+An `assetId` reaching either of those is matched in full against
+`app.assets.ASSET_ID` before it is joined to a path.
+
 An upload batch is kept on disk under `uploads/batch-*/source/`, because the job
 re-reads the originals. It used to be deleted at the end of the upload request,
 which is why nothing could ever be reconstructed from it.
@@ -86,7 +98,20 @@ Job stages, and roughly what each costs:
 | `geocode` | 1% | address to coordinates |
 | `reconstruct` | 79% | the engine |
 | `anchor` | 7% | ground, isolation, scale, heading, re-origin |
-| `publish` | 3% | write the asset where the viewer loads it |
+| `publish` | 3% | write the asset where the viewer loads it, and a browser-sized copy beside it |
+
+`publish` writes `web/assets/<asset-id>/` with `building.glb` (full resolution,
+what the export packages), `building-lod.glb` (the same geometry, texture
+resampled — `reconstruction/optimize.py`, declared as `models.low` and recorded
+under `provenance.webModel`), `placement.json`, `provenance.json`,
+`coverage.json` and `thumbnail.webp`. A failed resample is not a failed publish;
+the asset then has no `models.low` and the viewer loads the full model.
+
+The engine declares the frame its export is in — `RealityScanEngine.up_axis` is
+`Z` — and the job passes it to `anchor_model`. Every measurement the anchor makes
+is taken along that axis, so a wrong value there lays the building on its side
+while every number in the report still looks reasonable. The report's `upAxis`
+step records whether the geometry agrees with the declaration.
 
 Job state lives in `uploads/jobs/<id>/job.json`, not in memory, so a restart
 leaves a record. A job left `running` by a restart is marked failed when the

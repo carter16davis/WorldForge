@@ -186,6 +186,60 @@ code { font-family: var(--mono); }
 
 .intake-notes { margin-top: 8px; display: grid; gap: 5px; }
 
+/* ─────────────────────── saved model library ─────────────────────── */
+/* Every asset published under web/assets. A reconstruction takes minutes, so
+   losing one to a page reload is the most expensive mistake this UI could make. */
+
+.step--library h2 { margin-bottom: 10px; }
+.chip--inline { margin-left: auto; }
+
+.library { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+
+.library-item {
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 9px;
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.library-item:hover { border-color: var(--accent); }
+.library-item[aria-current="true"] {
+  border-color: var(--era-tint);
+  box-shadow: 0 0 0 1px var(--era-glow);
+}
+
+.library-item .shot {
+  width: 44px; height: 44px; border-radius: 6px; object-fit: cover;
+  background: var(--panel); border: 1px solid var(--line-soft);
+}
+.library-item .shot--none { display: grid; place-items: center; color: var(--text-mute); font-size: 15px; }
+
+.library-item .who { min-width: 0; display: grid; gap: 2px; }
+.library-item .title {
+  font-size: 12px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.library-item .meta {
+  font-size: 10px; color: var(--text-mute); font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.library-item .tag {
+  padding: 2px 7px; border-radius: 999px;
+  font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
+  border: 1px solid var(--line);
+  color: var(--text-mute);
+}
+.library-item[data-kind="scan"] .tag { color: var(--verified); border-color: rgba(69,192,138,.35); }
+.library-item[data-kind="prepared"] .tag { color: var(--accent-2); border-color: rgba(111,211,232,.3); }
+.library-item[data-model="false"] { opacity: .55; }
+
 .prepared { margin-top: 12px; }
 .prepared summary {
   font-size: 11.5px; color: var(--text-dim); cursor: pointer;

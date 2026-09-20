@@ -52,10 +52,19 @@ async function boot() {
 
   try {
     const session = await api.session();
-    update({ capabilities: session.capabilities, venues: session.venues }, "session");
+    update({
+      capabilities: session.capabilities,
+      venues: session.venues,
+      assets: session.assets || [],
+    }, "session");
     applyBundle(session.asset, "session");
     await loadAsset();
-    toast("Prepared venue loaded. Enter an address or drop photos to start.", "ok");
+
+    const scans = (session.assets || []).filter((a) => a.kind === "scan").length;
+    toast(scans
+      ? `Prepared venue loaded. ${scans} saved reconstruction${scans > 1 ? "s" : ""} ` +
+        `above — pick one, or drop photos to make another.`
+      : "Prepared venue loaded. Enter an address or drop photos to start.", "ok");
   } catch (err) {
     badge3d("could not load");
     toast(err.message, "error");
@@ -64,12 +73,16 @@ async function boot() {
 
 /** Load the current asset into both viewports. */
 async function loadAsset() {
-  const { placement, coverage, modelUrl, cells } = state;
+  const { placement, coverage, previewUrl, modelUrl, cells } = state;
   if (!placement) return;
 
   badge3d("loading model…");
   try {
-    const stats = await viewer.setAsset({ modelUrl, placement, coverage });
+    // previewUrl is the resampled copy of the same geometry when the publish
+    // step made one; the export still ships the full-resolution building.glb.
+    const stats = await viewer.setAsset({
+      modelUrl: previewUrl || modelUrl, placement, coverage,
+    });
     badge3d(stats
       ? `${stats.widthM.toFixed(0)} × ${stats.depthM.toFixed(0)} × ${stats.heightM.toFixed(0)} m` +
         ` · ${stats.triangles.toLocaleString()} tri`
@@ -101,6 +114,33 @@ async function loadAsset() {
 }
 
 /* ───────────────────────── user actions ───────────────────────── */
+
+/** Load a published asset by id — the prepared venue, or a saved reconstruction. */
+async function openAsset(assetId) {
+  if (!assetId || assetId === state.placement?.assetId) return;
+  update({ busy: true }, "busy");
+  badge3d("loading model…");
+  try {
+    applyBundle(await api.asset(assetId), "asset");
+    await loadAsset();
+    $("address-input").value = state.placement.sourceAddress || "";
+    toast(`Loaded ${state.placement.name || assetId}.`, "ok");
+  } catch (err) {
+    toast(`Could not open ${assetId}: ${err.message}`, "error");
+  } finally {
+    update({ busy: false }, "busy");
+  }
+}
+
+/** Re-read what is published on the server. */
+async function refreshLibrary() {
+  try {
+    const { assets } = await api.assets();
+    update({ assets }, "library");
+  } catch (err) {
+    toast(err.message, "warn");
+  }
+}
 
 async function placeAt(lat, lon, address = "") {
   if (!state.placement) return;
@@ -238,8 +278,10 @@ async function pollJob(jobId) {
         applyBundle(job.asset, "reconstructed");
         await loadAsset();
       }
-      toast("Reconstruction complete. This model is measured from your photos — " +
-            "check heading and scale before exporting.", "ok");
+      // It is on disk under web/assets now, so it survives this tab.
+      await refreshLibrary();
+      toast("Reconstruction complete and saved to the model library. This one is " +
+            "measured from your photos — check heading and scale before exporting.", "ok");
       return;
     }
     if (job.status === "failed") {
@@ -349,6 +391,7 @@ function bindControls() {
   }
   dropzone.addEventListener("drop", (e) => handleFiles(e.dataTransfer.files));
   $("reconstruct-btn").addEventListener("click", startReconstruction);
+  $("library-refresh").addEventListener("click", refreshLibrary);
 
   $("address-form").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -432,6 +475,9 @@ function render(s, reason) {
     renderFacts(s);
     renderCoverage(s.coverage);
   }
+  if (["session", "library", "asset", "placed", "reconstructed"].includes(reason)) {
+    renderLibrary(s);
+  }
   if (reason === "resolved") renderResolved(s.resolved);
   if (reason === "intake") renderIntake(s.intake);
   if (reason === "intake" || reason === "job") renderReconstruct(s);
@@ -450,6 +496,66 @@ function renderCapabilities(capabilities) {
     el.title = `${c.provider} — ${c.detail}`;
     return el;
   }));
+}
+
+const BYTES = (n) =>
+  n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : n >= 1e3 ? `${Math.round(n / 1e3)} kB` : `${n} B`;
+
+function renderLibrary(s) {
+  const host = $("library");
+  const hint = $("library-hint");
+  const assets = s.assets || [];
+
+  if (!assets.length) {
+    host.replaceChildren();
+    hint.textContent = "Nothing published yet. Reconstructing a building saves it here.";
+    return;
+  }
+
+  host.replaceChildren(...assets.map((a) => {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "library-item";
+    button.dataset.kind = a.kind;
+    button.dataset.model = String(a.hasModel);
+    button.setAttribute("aria-current", String(a.assetId === s.placement?.assetId));
+
+    if (a.thumbnailUrl) {
+      const img = document.createElement("img");
+      img.className = "shot";
+      img.src = a.thumbnailUrl;
+      img.alt = "";
+      img.loading = "lazy";
+      button.append(img);
+    } else {
+      button.append(el("span", "shot shot--none", "▦"));
+    }
+
+    const who = document.createElement("div");
+    who.className = "who";
+    who.append(el("span", "title", a.name || a.assetId));
+    who.append(el("span", "meta", [
+      a.cell,
+      a.hasModel ? BYTES(a.modelBytes) : "no model",
+      a.unresolved.length ? `${a.unresolved.join(" + ")} unset` : "",
+    ].filter(Boolean).join(" · ")));
+    button.append(who);
+
+    button.append(el("span", "tag", a.kind === "scan" ? "scan" : "prepared"));
+    button.title = `${a.assetId}\n${a.sourceAddress || "no address"}\n` +
+                   `${a.reconstructionTool || "unknown tool"} · ${a.updatedAt}`;
+    button.addEventListener("click", () => openAsset(a.assetId));
+
+    item.append(button);
+    return item;
+  }));
+
+  const scans = assets.filter((a) => a.kind === "scan").length;
+  hint.textContent =
+    `${assets.length} published under web/assets — ${scans} reconstructed from ` +
+    `media, ${assets.length - scans} prepared. The viewer loads the resampled ` +
+    `copy; the export ships the full-resolution model.`;
 }
 
 function renderVenues(venues) {

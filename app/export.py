@@ -64,8 +64,20 @@ def _simplify_latlon(ring: list[tuple[float, float]], tol_m: float) -> list[tupl
     return [(origin[0] + y / m_lat, origin[1] + x / m_lon) for x, y in coords]
 
 
-def build_lod(placement: Placement, dest: Path) -> str | None:
-    """Derive building-lod.glb. Returns the filename, or None with a reason logged."""
+def build_lod(placement: Placement, dest: Path, source: Path | None = None) -> str | None:
+    """Derive building-lod.glb. Returns the filename, or None with a reason logged.
+
+    A reconstruction already has one: `reconstruction.optimize` writes a
+    browser-sized copy of the real geometry when the asset is published, and that
+    is a far better low-detail model than anything derivable here. Copy it.
+    Extruding the footprint is the fallback for the prepared asset, whose GLB is
+    a footprint extrusion to begin with.
+    """
+    published = (source / "building-lod.glb") if source else None
+    if published is not None and published.is_file():
+        shutil.copy2(published, dest / "building-lod.glb")
+        return "building-lod.glb"
+
     if not placement.footprint or len(placement.footprint) < 4:
         return None
     height = placement.dimensions.heightMeters
@@ -143,7 +155,7 @@ def package(placement: Placement, *, provenance: dict, coverage: dict,
             shutil.copy2(thumb, stage / "thumbnail.webp")
             written.append("thumbnail.webp")
 
-        if (lod := build_lod(placement, stage)) is not None:
+        if (lod := build_lod(placement, stage, src)) is not None:
             check_glb(stage / lod)
             written.append(lod)
 

@@ -66,10 +66,33 @@ FOOTPRINT_LIFT_FRACTION = 0.10
 # otherwise win on height alone.
 MIN_BODY_AREA_SHARE = 0.02
 
-# A kept body holding less than this share of the scan is reported at reduced
-# confidence: the scan was shredded rather than cleanly multi-body, so what was
-# kept is a piece of the building rather than the building.
+# A kept body holding less than this share of the scan is not the whole
+# building: the scan was shredded rather than cleanly multi-body, so the cluster
+# rule below is used instead of keeping that one body.
 WHOLE_BODY_AREA_SHARE = 0.25
+
+# A body holding a substantial share of the scan's area in no more than this many
+# triangles is a *sheet*: a few enormous flat polygons. Automatic reconstruction
+# regions produce them constantly — the ground plane under a drone orbit, and the
+# backdrop stitched across the sky behind the subject. They are never the
+# building, and because area is how a body earns the right to be considered here,
+# leaving them in lets a twenty-triangle plane outrank four hundred thousand
+# triangles of actual reconstruction: that is what reduced a MetLife Stadium scan
+# to a 23-vertex sliver.
+#
+# The threshold is absolute rather than relative to the rest of the scan, because
+# the comparison that would make it relative is the one being subverted. Any
+# surface a photogrammetric reconstruction actually measured is described in
+# thousands of small triangles, whatever else the scan contains.
+SHEET_MAX_FACES = 100
+
+# A scan that splits into more bodies than this did not split into
+# subject-and-clutter; it shattered. A clean capture yields a handful of bodies —
+# the building, the sidewalk, a car — and the tallest substantial one is the
+# building. Hundreds of bodies means photogrammetry fragmented the subject
+# itself, and no single one of them is the building.
+SHREDDED_BODY_COUNT = 20
+
 
 ENU_TO_GLTF = np.array([
     [1.0, 0.0, 0.0, 0.0],   # east  -> +X
@@ -118,6 +141,62 @@ class AnchorReport:
 
 
 # ---------------------------------------------------------------------------
+# 0. Is the declared frame the mesh's actual frame?
+# ---------------------------------------------------------------------------
+
+AXIS_NAMES = ("east", "north", "up")
+
+
+def check_up_axis(mesh: trimesh.Trimesh, up: int, declared: str) -> Step:
+    """Measure which axis the mesh's flat surfaces actually stand on.
+
+    Everything after this assumes the mesh is upright: the ground plane is the
+    lowest dense band *along the up axis*, isolation ranks bodies by how high
+    they reach, and the footprint is the silhouette cast *down* the up axis. Feed
+    it a mesh lying on its side and every one of those is measured across the
+    building instead of through it — and the result is a plausible-looking asset
+    that is wrong in a way no number in the report admits to.
+
+    That is not hypothetical either. RealityScan exports in its own Z-up survey
+    frame, not glTF's Y-up, and anchoring its output as Y-up turned a stadium
+    into a 79 x 12 metre slab standing 38 metres tall.
+
+    This does not rotate anything. The engine that produced the file knows what
+    frame it writes and says so; guessing an axis from geometry would trade a
+    declaration that can be fixed once for a heuristic that fails on tall narrow
+    buildings, where the walls out-area the roof. What it does is check the
+    declaration against the mesh and put the disagreement in the report.
+    """
+    normals = mesh.face_normals
+    weights = mesh.area_faces
+    total = float(weights.sum()) or 1.0
+    flatness = [float((weights * np.abs(normals[:, axis])).sum()) / total
+                for axis in range(3)]
+
+    dominant = int(np.argmax(flatness))
+    runner_up = max(f for axis, f in enumerate(flatness) if axis != dominant)
+    margin = flatness[dominant] / runner_up if runner_up > 0 else float("inf")
+
+    if dominant == up:
+        return Step("upAxis", True, float(up), "surface-normals",
+                    round(min(0.95, flatness[up]), 3),
+                    f"Declared {declared}-up, and the mesh agrees: most surface area "
+                    f"faces along the up axis ({flatness[up] * 100:.0f}% against "
+                    f"{runner_up * 100:.0f}% for the next).")
+
+    return Step(
+        "upAxis", True, float(up), "surface-normals", 0.1,
+        f"Declared {declared}-up, but the mesh does not look like it. Most surface "
+        f"area faces along the {AXIS_NAMES[dominant]} axis "
+        f"({flatness[dominant] * 100:.0f}% against {flatness[up] * 100:.0f}% for the "
+        f"declared up axis, {margin:.1f}x). If the model comes out lying on its "
+        f"side, the export is in a different frame than the engine declares — "
+        f"re-run with the other up axis. Ground plane, isolation and footprint "
+        f"below were all measured against the declared axis.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # 1. Ground plane
 # ---------------------------------------------------------------------------
 
@@ -153,30 +232,82 @@ def detect_ground(vertices: np.ndarray, up: int) -> tuple[float, float]:
 # 2. Isolation
 # ---------------------------------------------------------------------------
 
+@dataclass
+class _Body:
+    """One connected component, described without building it into a mesh."""
+
+    faces: np.ndarray
+    areaShare: float        # share of the scan's surface area
+    top: float              # highest point, in model units
+
+    @property
+    def is_sheet(self) -> bool:
+        return len(self.faces) <= SHEET_MAX_FACES and self.areaShare >= MIN_BODY_AREA_SHARE
+
+
+def _describe_bodies(mesh: trimesh.Trimesh, components: list[np.ndarray],
+                     up: int) -> list[_Body]:
+    """Measure every component from face indices alone.
+
+    Nothing here builds a submesh, because building one copies the visuals with
+    it — see the note in `isolate_building`.
+    """
+    area = mesh.area_faces
+    total = float(area.sum()) or 1.0
+    heights = np.asarray(mesh.vertices)[:, up]
+
+    return [
+        _Body(
+            faces=faces,
+            areaShare=float(area[faces].sum()) / total,
+            top=float(heights[np.unique(mesh.faces[faces])].max()),
+        )
+        for faces in components
+    ]
+
+
 def isolate_building(mesh: trimesh.Trimesh, up: int,
                      ground: float) -> tuple[trimesh.Trimesh, Step]:
-    """Keep the tallest connected body; drop sidewalk slabs, cars and stray islands.
+    """Drop what shared the reconstruction region: backdrop sheets, sidewalk
+    slabs, cars and stray islands.
 
-    A reconstruction region in RealityScan crops a *box*, not a subject. What is
-    left inside it still contains whatever shared that box. Among bodies large
-    enough to be a building, the one reaching highest above the ground plane is
-    a much safer discriminator than volume: a wide, flat road surface can easily
-    out-volume a narrow building. The size floor is what makes height usable at
-    all; see MIN_BODY_AREA_SHARE.
+    A reconstruction region in RealityScan crops a *box*, not a subject, and an
+    unattended run places that box automatically. What is left inside it is the
+    building plus whatever else fitted, in three flavours:
+
+    *Sheets* go first, unconditionally. An automatic region stitches the ground
+    under the capture and a backdrop behind it into a handful of enormous
+    triangles, and area is how a body earns consideration here — so a
+    twenty-triangle plane holding a fifth of the scan's surface outranks the
+    building itself. That is not a hypothetical: it is what reduced a MetLife
+    Stadium scan to a 23-vertex sliver. See SHEET_AREA_RATIO.
+
+    Then one of two rules, depending on what the split found:
+
+    - **A handful of bodies, or one that is most of the scan**, is a clean
+      capture: the building plus what stood next to it. Keep the tallest among
+      the substantial ones — a wide, flat road surface can easily out-*area* a
+      narrow building, but it cannot out-reach it.
+    - **A scan in hundreds of pieces** has no body that is the building.
+      Photogrammetry shreds a large or reflective subject into fragments that
+      are all genuinely part of it, so keeping any one of them throws the
+      building away. Keep every solid piece, and say in the report that nothing
+      beyond the sheets was removed. See SHREDDED_BODY_COUNT.
 
     Returns the mesh and the step describing what happened, including the case
     where splitting could not run at all. Quietly returning the whole scan there
     would hand back the sidewalk and the car inside something labelled
     "isolated", which is worse than saying it did not work.
 
-    The components are chosen from face indices and only the winner is ever
-    built into a mesh. `mesh.split()` would build all of them, and building one
-    copies the visuals with it: a RealityScan export carries a single 8192x8192
-    atlas, so each body costs 256 MB of texture whether it is the building or a
-    three-triangle speck of scanner noise. A real scan splits into hundreds of
-    bodies, which is hundreds of gigabytes of texture copies for a mesh whose
-    geometry fits in a few hundred megabytes. Under WSL that does not raise
-    MemoryError, it takes the virtual machine down with it.
+    The components are chosen from face indices and only the winners are ever
+    built into a mesh, in a single `submesh` call. `mesh.split()` would build all
+    of them, and building one copies the visuals with it: a RealityScan export
+    carries a single 8192x8192 atlas, so each body costs 256 MB of texture
+    whether it is the building or a three-triangle speck of scanner noise. A real
+    scan splits into hundreds of bodies, which is hundreds of gigabytes of
+    texture copies for a mesh whose geometry fits in a few hundred megabytes.
+    Under WSL that does not raise MemoryError, it takes the virtual machine down
+    with it.
     """
     before = len(mesh.vertices)
     try:
@@ -194,42 +325,65 @@ def isolate_building(mesh: trimesh.Trimesh, up: int,
         return mesh, Step("isolation", True, 1.0, "largest-vertical-body", 0.6,
                           "Scan was a single connected body; nothing removed.")
 
-    # Only bodies substantial enough to *be* a building may win. Height alone is
-    # not a discriminator on a real scan: a stray speck of noise sitting above
-    # the roof outranks the roof by a hair, and would be handed back as the
-    # isolated building.
-    area = mesh.area_faces
-    total = float(area.sum())
-    shares = [float(area[c].sum()) / total if total > 0 else 0.0 for c in components]
-    candidates = [(c, s) for c, s in zip(components, shares)
-                  if s >= MIN_BODY_AREA_SHARE]
-    if not candidates:
-        # Every piece is below the floor. The largest is still a better answer
-        # than the whole scan, but it is a piece, and the confidence says so.
-        candidates = [max(zip(components, shares), key=lambda pair: pair[1])]
+    bodies = _describe_bodies(mesh, components, up)
+    sheets = [b for b in bodies if b.is_sheet]
+    solid = [b for b in bodies if not b.is_sheet]
+    sheet_area = sum(b.areaShare for b in sheets)
+    sheet_note = (
+        f"Removed {len(sheets)} flat backdrop sheet(s) holding {sheet_area * 100:.0f}% "
+        f"of the scan's surface in {sum(len(b.faces) for b in sheets)} triangles. "
+        if sheets else ""
+    )
 
-    heights = mesh.vertices[:, up]
-    tallest, share = max(
-        candidates, key=lambda pair: float(heights[mesh.faces[pair[0]]].max() - ground))
-    kept = mesh.submesh([tallest], append=True)
+    if not solid:
+        # Every body is an enormous flat plane, so there is no building in here
+        # to isolate. Saying so beats handing back the biggest sheet.
+        return mesh, Step(
+            "isolation", False, 1.0, "sheet-rejection", 0.0,
+            f"Every one of the {len(components)} bodies in this scan is a flat "
+            f"sheet of a few huge triangles — the ground and backdrop an automatic "
+            f"reconstruction region stitches in. There is no reconstructed "
+            f"building here to isolate. The scan was left whole.",
+        )
+
+    # Only bodies substantial enough to *be* a building may win on height: a
+    # stray speck of noise sitting above the roof outranks the roof by a hair.
+    substantial = [b for b in solid if b.areaShare >= MIN_BODY_AREA_SHARE]
+    tallest = max(substantial or solid, key=lambda b: b.top - ground)
+
+    if (len(solid) <= SHREDDED_BODY_COUNT
+            or tallest.areaShare >= WHOLE_BODY_AREA_SHARE):
+        kept = mesh.submesh([tallest.faces], append=True)
+        return kept, Step(
+            "isolation", True, round(len(kept.vertices) / before, 4),
+            "largest-vertical-body", 0.6,
+            f"{sheet_note}Kept {len(kept.vertices)} of {before} vertices as the "
+            f"building body, discarding {len(components) - len(sheets) - 1} other "
+            f"connected bodies.")
+
+    # Shredded: every solid piece is part of the building, so every solid piece
+    # is kept. There is no second rule here on purpose. Any further guess about
+    # which fragments are "really" the subject — biggest body, nearest cluster,
+    # tallest — is what published a 23-vertex sliver of a stadium, and the cost
+    # of guessing wrong is losing the reconstruction the user waited ten minutes
+    # for. Keeping a neighbour's wall is a visible, correctable mistake; deleting
+    # the building is not.
+    largest = max(solid, key=lambda b: b.areaShare)
+    kept = mesh.submesh([np.concatenate([b.faces for b in solid])], append=True)
     after = len(kept.vertices)
+    kept_area = sum(b.areaShare for b in solid)
 
-    if share >= WHOLE_BODY_AREA_SHARE:
-        return kept, Step("isolation", True, round(after / before, 4),
-                          "largest-vertical-body", 0.6,
-                          f"Kept {after} of {before} vertices as the building body, "
-                          f"discarding {len(components) - 1} other connected bodies.")
-    # A scan in hundreds of pieces has no body that is the whole building. Say
-    # that, rather than labelling a fragment "isolated" and letting the scale and
-    # heading solved from its footprint look like measurements of the building.
     return kept, Step(
-        "isolation", True, round(after / before, 4), "largest-vertical-body", 0.2,
-        f"Kept {after} of {before} vertices, but the scan is in "
-        f"{len(components)} disconnected pieces and this body is only "
-        f"{share * 100:.0f}% of its surface, so it is a fragment of the building "
-        f"rather than the whole. Expect footprint, scale and heading to need "
-        f"correction in the placement editor; recapture with more overlap, or "
-        f"place the reconstruction region by hand with the prepare/build commands.",
+        "isolation", True, round(after / before, 4), "sheet-rejection", 0.35,
+        f"{sheet_note}The scan is in {len(components)} disconnected pieces with no "
+        f"single body larger than {largest.areaShare * 100:.0f}% of it, so "
+        f"photogrammetry fragmented the building itself and no one body is the "
+        f"subject. All {len(solid)} solid pieces were kept — "
+        f"{kept_area * 100:.0f}% of the surface, {after} of {before} vertices — "
+        f"so anything else that stood inside the reconstruction region is still "
+        f"in the mesh. Check the footprint, scale and heading in the placement "
+        f"editor; recapture with more overlap, or place the reconstruction region "
+        f"by hand with the prepare/build commands.",
     )
 
 
@@ -424,6 +578,9 @@ def anchor_model(model_path: str | Path,
     if up_axis == "Y":
         mesh.apply_transform(GLTF_TO_ENU)
     up = 2
+
+    # --- 0. is the declared frame the mesh's actual frame? ---
+    report.add(check_up_axis(mesh, up, up_axis))
 
     # --- 1. ground plane ---
     ground, inliers = detect_ground(mesh.vertices, up)

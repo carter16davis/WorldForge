@@ -36,7 +36,13 @@ def test_capabilities_report_what_is_actually_wired(client):
         assert caps["Reconstruction"]["provider"] == usable[0]["name"]
         assert "Reconstruct" in caps["Reconstruction"]["detail"]
     else:
-        assert "prepared" in caps["Reconstruction"]["detail"].lower()
+        # It must say plainly that nothing will be reconstructed here, and name
+        # what is missing. It must *not* promise the prepared asset as a
+        # fallback: `/api/reconstruct` returns 503 rather than quietly handing
+        # back a footprint extrusion and calling it a reconstruction.
+        detail = caps["Reconstruction"]["detail"].lower()
+        assert "not reconstructed" in detail
+        assert any(e["name"].lower().split()[0] in detail for e in engine_status())
 
     served = client.get("/api/engines").json()
     assert served["canReconstruct"] is bool(usable)
@@ -86,6 +92,69 @@ def test_lod_is_generated_and_declared(client):
         # An "LOD" that is not smaller than the model is a lie with a filename.
         assert len(lod) < len(package.read(prefix + "building.glb"))
         assert json.loads(package.read(prefix + "placement.json"))["models"]["low"] == "building-lod.glb"
+
+
+def test_a_published_reconstruction_outlives_the_job_that_made_it(client):
+    """The failure this guards against loses ten minutes of photogrammetry.
+
+    A reconstruction is written to `web/assets` and the browser tab that started
+    it gets the bundle when the job finishes. Reload the page and that tab is
+    gone — so unless the asset can be listed and re-opened from disk, the model
+    is stranded in a directory with no route to it.
+    """
+    from app.assets import ASSET_DIR
+    from app.demo_data import DEMO_ASSET_ID
+
+    written = {a["assetId"] for a in client.get("/api/assets").json()["assets"]}
+    on_disk = {d.name for d in ASSET_DIR.iterdir()
+               if (d / "placement.json").is_file()}
+    assert written == on_disk
+    assert DEMO_ASSET_ID in written
+
+    # Every listed asset opens as a full bundle, with no prior session state.
+    for asset_id in written:
+        bundle = client.get(f"/api/assets/{asset_id}").json()
+        assert bundle["placement"]["assetId"] == asset_id
+        assert bundle["modelUrl"].endswith("/building.glb")
+        assert bundle["previewUrl"].endswith(".glb")
+        assert client.get(bundle["previewUrl"]).status_code == 200
+
+
+def test_an_asset_id_cannot_escape_the_asset_directory(client):
+    for hostile in ("../../etc/passwd", "..", ".ssh", "a/b", ""):
+        response = client.get(f"/api/assets/{hostile}")
+        assert response.status_code in (400, 404, 422), f"{hostile!r} -> {response.status_code}"
+        assert "passwd" not in response.text
+
+
+def test_any_published_asset_can_be_moved_not_only_the_prepared_one(client, tmp_path):
+    """`/api/place` used to 404 on anything but the demo asset, which meant a
+    reconstruction was stuck at whatever address was typed before it started —
+    with a placement editor on screen offering to fix it."""
+    import shutil
+
+    from app.assets import ASSET_DIR
+    from app.demo_data import DEMO_ASSET_ID
+
+    scan = ASSET_DIR / "test-scan-placeable"
+    shutil.copytree(ASSET_DIR / DEMO_ASSET_ID, scan, dirs_exist_ok=True)
+    try:
+        doc = json.loads((scan / "placement.json").read_text())
+        doc["assetId"] = scan.name
+        (scan / "placement.json").write_text(json.dumps(doc))
+
+        moved = client.post("/api/place", json={
+            "assetId": scan.name, "address": "MetLife Stadium",
+            "transform": {"headingDegrees": 42},
+        })
+        assert moved.status_code == 200, moved.text
+        placement = moved.json()["asset"]["placement"]
+        assert placement["assetId"] == scan.name
+        assert placement["transform"]["headingDegrees"] == 42
+        # The cell follows the coordinates, as the AGENTS.md checklist requires.
+        assert placement["spatialIndex"]["cell"]
+    finally:
+        shutil.rmtree(scan, ignore_errors=True)
 
 
 def test_exports_are_immutable_snapshots(client):
