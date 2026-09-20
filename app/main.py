@@ -229,9 +229,8 @@ async def upload(files: list[UploadFile] = File(default=[]),
                  address: str = Form(default="")) -> dict:
     """Intake for photos/video.
 
-    Always returns a report. If a reconstruction module is wired on this
-    machine it runs; otherwise the response says plainly that the prepared asset
-    is being used, so the demo keeps moving either way.
+    Saves and analyses media; never creates a model by itself. A separate
+    /api/reconstruct request starts a job when an engine is available.
     """
     if not files:
         raise HTTPException(422, "No files received.")

@@ -65,11 +65,14 @@ async function boot() {
 /** Load the current asset into both viewports. */
 async function loadAsset() {
   const { placement, coverage, modelUrl, cells } = state;
-  if (!placement) return;
+  if (!placement) return false;
+
+  let modelLoaded = false;
 
   badge3d("loading model…");
   try {
     const stats = await viewer.setAsset({ modelUrl, placement, coverage });
+    modelLoaded = true;
     badge3d(stats
       ? `${stats.widthM.toFixed(0)} × ${stats.depthM.toFixed(0)} × ${stats.heightM.toFixed(0)} m` +
         ` · ${stats.triangles.toLocaleString()} tri`
@@ -88,7 +91,7 @@ async function loadAsset() {
   ]);
   if (!mapUp) {
     mapBadge("map unavailable");
-    return;
+    return modelLoaded;
   }
   mapBadge("fetching World Cells…");
   const geometry = await api
@@ -98,6 +101,7 @@ async function loadAsset() {
   mapView.setAsset(placement, cells, geometry);
   mapView.flyToAsset();
   syncTransformInputs(placement.transform);
+  return modelLoaded;
 }
 
 /* ───────────────────────── user actions ───────────────────────── */
@@ -178,6 +182,11 @@ async function handleFiles(fileList) {
       engines: report.engines || [],
       job: null,
     }, "intake");
+    const modelStatus = $("upload-model-status");
+    modelStatus.hidden = false;
+    modelStatus.textContent = report.canReconstruct
+      ? "Upload analyzed. No new 3D model yet: enter the address and click Reconstruct this building. The previous model stays visible until the new one is ready."
+      : "Upload analyzed, but no 3D model was created: this machine has no available reconstruction engine. The viewer still shows the previous model. Run reconstruction on a configured machine to create a model from these photos.";
     toast(`Analysed ${report.totalCount} file(s). ` +
           (report.canReconstruct
             ? "Enter the address, then reconstruct."
@@ -234,10 +243,17 @@ async function pollJob(jobId) {
     update({ job }, "job");
 
     if (job.status === "done") {
-      if (job.asset) {
-        applyBundle(job.asset, "reconstructed");
-        await loadAsset();
+      if (!job.asset) {
+        $("upload-model-status").textContent = "The job finished without a model bundle. The previous model is still shown.";
+        toast("Reconstruction finished without a model to display.", "error");
+        return;
       }
+      applyBundle(job.asset, "reconstructed");
+      const loaded = await loadAsset();
+      $("upload-model-status").textContent = loaded
+        ? "Reconstruction finished. The viewer now shows the model made from your upload."
+        : "Reconstruction finished, but its model failed to load. Check the model error below the viewer.";
+      if (!loaded) return;
       toast("Reconstruction complete. This model is measured from your photos — " +
             "check heading and scale before exporting.", "ok");
       return;
@@ -424,6 +440,7 @@ function render(s, reason) {
   if (reason === "session") {
     renderCapabilities(s.capabilities);
     renderVenues(s.venues);
+    renderReconstruct(s);
     $("coverage-source").textContent = s.capabilities.find(c => c.name === "Coverage agent")?.wired
       ? "Coverage supplied by the reconstruction pipeline."
       : "Illustrative demo report: counts and confidence below are simulated, not measured from photos.";

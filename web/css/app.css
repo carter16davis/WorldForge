@@ -517,6 +517,8 @@ button.ghost:hover { border-color: var(--accent); color: var(--text); }
 .reconstruct > button:hover:not(:disabled) { filter: brightness(1.08); }
 .reconstruct > button:disabled { opacity: .45; cursor: not-allowed; }
 .job { display: grid; gap: 6px; }
+/* Author display rules must not override the browser's hidden state. */
+[hidden] { display: none !important; }
 .job-head {
   display: flex; justify-content: space-between; font-size: 11px;
   color: var(--text-mute); text-transform: uppercase; letter-spacing: .04em;
