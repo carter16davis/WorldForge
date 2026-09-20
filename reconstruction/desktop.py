@@ -10,6 +10,26 @@ from datetime import datetime, timezone
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 
+# RealityScan's three meshing qualities, in order of how much of each photo
+# they use: preview decimates the images heavily, normal halves them, high
+# meshes from them at full resolution. High is the default because the detail
+# in a facade is the reason to photograph a building at all.
+DETAIL_COMMANDS = {
+    'preview': '-calculatePreviewModel',
+    'normal': '-calculateNormalModel',
+    'high': '-calculateHighModel',
+}
+DEFAULT_DETAIL = 'high'
+
+
+def mesh_command(detail=None):
+    """(command, normalised name) for a detail level. Raises on an unknown one."""
+    key = (detail or DEFAULT_DETAIL).strip().lower()
+    if key not in DETAIL_COMMANDS:
+        raise ValueError(f'Unknown reconstruction detail {detail!r}. '
+                         f'Choose one of {", ".join(sorted(DETAIL_COMMANDS))}.')
+    return DETAIL_COMMANDS[key], key
+
 
 def desktop_path(path):
     path = str(Path(path).resolve())
@@ -60,8 +80,8 @@ def prepare_commands(photos, project):
             '-save', desktop_path(project)]
 
 
-def build_commands(project, output, preset, triangles=None):
-    commands = ['-load', desktop_path(project), '-calculateNormalModel']
+def build_commands(project, output, preset, triangles=None, detail=None):
+    commands = ['-load', desktop_path(project), mesh_command(detail)[0]]
     if triangles is not None:
         commands += ['-simplify', str(triangles)]
     return commands + ['-unwrap', '-calculateTexture', '-save', desktop_path(output / 'finished.rsproj'),
@@ -132,8 +152,9 @@ def prepare(photos, output=None, executable=None, dry_run=False):
         print(f'Prepared project: {project}\nNext: build --project "{project}" --export-settings reconstruction/presets/glb.xml')
 
 
-def build(project, preset, triangles=None, executable=None, dry_run=False):
+def build(project, preset, triangles=None, executable=None, dry_run=False, detail=None):
     project, preset = Path(project).resolve(), Path(preset).resolve()
+    _, detail = mesh_command(detail)
     check_project(project)
     if Path(str(project) + '.autosave').exists():
         raise ValueError('Resolve the autosave in RealityScan, save and close the project before building.')
@@ -161,7 +182,8 @@ def build(project, preset, triangles=None, executable=None, dry_run=False):
         check_project(output / 'finished.rsproj')
         for path in check_export(output):
             print(f'Export: {path}')
-    execute(executable, build_commands(project, output, preset, triangles), output, dry_run, verify,
-            {'stage': 'build', 'sourceProject': str(project), 'exportPreset': str(preset)})
+    execute(executable, build_commands(project, output, preset, triangles, detail), output, dry_run, verify,
+            {'stage': 'build', 'sourceProject': str(project), 'exportPreset': str(preset),
+             'detail': detail, 'triangleTarget': triangles})
     if not dry_run:
         print(f'Finished project: {output / "finished.rsproj"}\nTextures are embedded in building.glb. VS Code does not automatically preview them.')

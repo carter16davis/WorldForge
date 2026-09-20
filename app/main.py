@@ -32,7 +32,7 @@ from app.demo_data import DEMO_ASSET_ID, demo_cells, demo_coverage, ensure_demo_
 from app.export import EXPORT_ROOT, package, world_uri, zip_package
 from app.geocode import VENUES
 from reconstruction import jobs
-from reconstruction.engine import engine_status, select_engine
+from reconstruction.engine import engine_status, select_engine, with_detail
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("worldforge")
@@ -100,6 +100,9 @@ class ReconstructRequest(BaseModel):
     # duration to land near 80 frames — see reconstruction.media.plan_interval.
     frameInterval: float | None = Field(default=None, gt=0, le=60, allow_inf_nan=False)
     maxFrames: int = Field(default=300, ge=10, le=2000)
+    # RealityScan's meshing quality. High is the default everywhere; the other
+    # two exist for a machine that cannot spare the time or the memory.
+    detail: str = "high"
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +356,10 @@ def reconstruct(req: ReconstructRequest) -> dict:
             503,
             "No reconstruction engine is available on this machine. "
             + " ".join(e["detail"] for e in engine_status() if not e["available"]))
+    try:
+        engine = with_detail(engine, req.detail)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     asset_id = f"scan-{req.batchId.removeprefix('batch-')[:12].lower()}"
     job = JOBS.create(address=req.address, assetId=asset_id,
@@ -362,7 +369,8 @@ def reconstruct(req: ReconstructRequest) -> dict:
                latitude=req.latitude, longitude=req.longitude,
                reference_meters=req.referenceMeters, license_notes=req.licenseNotes,
                frame_interval=req.frameInterval, max_frames=req.maxFrames)
-    return {"jobId": job.id, "assetId": asset_id, "engine": engine.name}
+    return {"jobId": job.id, "assetId": asset_id, "engine": engine.name,
+            "detail": getattr(engine, "detail", "")}
 
 
 @app.get("/api/jobs/{job_id}")

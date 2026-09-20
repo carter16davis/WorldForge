@@ -106,6 +106,26 @@ app shows that sentence rather than failing silently. If nothing is available,
 `POST /api/reconstruct` returns 503 — it does not quietly hand back the prepared
 asset and call it a reconstruction.
 
+#### How much detail RealityScan is asked for
+
+RealityScan meshes at **high detail** (`-calculateHighModel`), which builds
+depth maps from the photographs at full resolution, and keeps **1,000,000
+triangles**. Normal detail halves the images before it starts, and the previous
+400k cap threw away most of what survived that — on a building facade the
+difference is the difference between a measurement and a box.
+
+The **Mesh detail** selector on the upload panel picks per job
+(`detail` on `POST /api/reconstruct`: `high`, `normal`, `preview`), and two
+environment variables move the defaults:
+
+```sh
+export WORLDFORGE_RECONSTRUCTION_DETAIL=normal     # high | normal | preview
+export WORLDFORGE_RECONSTRUCTION_TRIANGLES=400000  # 0 keeps every triangle
+```
+
+High detail costs time and memory. `preview` is the honest choice when you only
+need to know whether alignment worked.
+
 ### The unattended trade-off
 
 The CLI's `prepare` / `build` commands stop between alignment and meshing so you
@@ -128,6 +148,47 @@ placement editor can work around, and deleting the building is not.
 Under WSL, `wslpath -w` produces a `\\wsl.localhost\...` UNC path, which
 RealityScan handles inconsistently. Jobs are therefore staged onto the Windows
 filesystem first; set `WORLDFORGE_WIN_WORK_ROOT` if the guess is wrong.
+
+## Adjusting the model, and what the export does with it
+
+A photogrammetric scan has no units of its own. RealityScan returns a mesh whose
+"1" means whatever the solve made it mean, which is why the placement editor is
+not a nicety — it is where the model becomes a measurement.
+
+- **Heading, scale and ground offset** each have a slider and a number box. The
+  slider is for finding a value, the box for knowing one; they edit the same
+  transform and follow each other.
+- **Scale is logarithmic**, 0.01 to 100 m per model unit on the slider and
+  0.001 to 1000 typed. A linear 0.25–4 slider could not reach the scale a real
+  scan needs.
+- **Known height** solves the scale from a dimension you can look up: type the
+  building's real height in metres and the scale follows. It reads back the
+  current height, so it is a two-way control.
+- The facts panel measures the **loaded mesh**, not the last thing written to
+  `placement.json`. Drag the scale and the extent, height and the 3D badge
+  change with it.
+
+Export writes the size you settled on **into the GLB**:
+
+- `building.glb` and `building-lod.glb` are baked to metres — the scale is
+  applied as a glTF node transform, and a Z-up frame is laid down to Y-up at the
+  same time. Vertex data is byte-identical to the reconstruction's own output,
+  so dividing the factor back out restores the original exactly.
+- `placement.json` then declares `metersPerModelUnit: 1` and `upAxis: "Y"`, and
+  its `dimensions` and `boundingBoxMeters` are measured off the bytes that
+  shipped rather than copied from an earlier reconstruction.
+- **Heading and vertical offset are not baked.** They place the building in the
+  world rather than describe its size, and a map consumer expects to find them
+  in `placement.json`.
+- `manifest.json` carries a `model` block with the format, the dimensions, the
+  bounding box and the factor that was baked; `provenance.json` repeats it under
+  `exportTransform`. If baking is ever impossible for a file, the package still
+  exports — un-baked, with the scale left in `placement.json` and the reason
+  stated in the manifest's `problems`.
+
+Every model in the package is checked before it ships: GLB v2, declared length
+matching the file, at least one mesh, and no buffer or image pointing outside
+the file.
 
 ## What is real and what is prepared
 

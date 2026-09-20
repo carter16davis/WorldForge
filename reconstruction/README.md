@@ -154,9 +154,14 @@ flag. You can close the Python script and resume later with this same command.
 Resolve any project autosave in RealityScan before resuming.
 
 Build loads your saved selected component and region without realigning or resetting
-it, creates a Normal-quality mesh, unwraps, textures, and exports a self-contained textured GLB.
-Optional `--triangles 100000` simplifies **before** unwrap and texture; no target is
-imposed by default. A new `exports/<run>/` inside this workspace contains the model,
+it, creates a **High-quality** mesh (`-calculateHighModel`, depth maps from the
+photographs at full resolution), unwraps, textures, and exports a self-contained
+textured GLB. `--detail normal` or `--detail preview` trades that detail for time.
+Optional `--triangles 100000` simplifies **before** unwrap and texture, so the
+texture is laid out for the mesh that ships; no target is imposed by default here.
+The web app does impose one — a million triangles, see
+`WORLDFORGE_RECONSTRUCTION_TRIANGLES` — because its output goes straight into a
+browser. A new `exports/<run>/` inside this workspace contains the model,
 textures, finished project and sidecars, `run.json`, `realityscan.log`, and
 `progress.log`. The model and texture images are embedded in `building.glb`. Paths print on completion.
 Exporting into VS Code does not automatically provide a 3D preview.

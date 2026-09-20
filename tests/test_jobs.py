@@ -105,6 +105,49 @@ def test_realityscan_status_is_honest_about_this_machine():
     assert "not found" in status.detail.lower()
 
 
+def test_realityscan_meshes_at_full_detail_by_default(monkeypatch):
+    """A Normal-detail mesh halves the images before it builds depth maps, and
+    a 400k cap threw away most of what survived. Detail is the entire reason to
+    run photogrammetry rather than extrude a footprint, so the defaults ask for
+    it and the environment is what dials it back."""
+    monkeypatch.delenv("WORLDFORGE_RECONSTRUCTION_TRIANGLES", raising=False)
+    engine = engines.RealityScanEngine()
+    assert engine.detail == "high"
+    assert engine.triangles == engines.DEFAULT_TRIANGLES
+
+    monkeypatch.setattr(engines.desktop, "desktop_path", str)
+    commands = engines.oneshot_commands(
+        Path("photos"), Path("out"), Path("preset.xml"), engine.triangles, engine.detail)
+
+    assert "-calculateHighModel" in commands
+    assert "-calculateNormalModel" not in commands
+    # Decimation has to happen before the unwrap or the atlas is laid out for
+    # a mesh that is not the one being shipped.
+    assert commands.index("-simplify") < commands.index("-unwrap") < commands.index("-calculateTexture")
+    assert commands[commands.index("-simplify") + 1] == str(engines.DEFAULT_TRIANGLES)
+
+
+def test_the_triangle_budget_and_detail_are_configurable(monkeypatch):
+    monkeypatch.setenv("WORLDFORGE_RECONSTRUCTION_TRIANGLES", "0")
+    assert engines.default_triangles() is None          # keep every triangle
+
+    monkeypatch.setattr(engines.desktop, "desktop_path", str)
+    engine = engines.RealityScanEngine()
+    commands = engines.oneshot_commands(
+        Path("p"), Path("o"), Path("s"), engine.triangles, engine.detail)
+    assert "-simplify" not in commands
+
+    monkeypatch.setenv("WORLDFORGE_RECONSTRUCTION_TRIANGLES", "250000")
+    assert engines.default_triangles() == 250_000
+
+    assert engines.with_detail(engines.RealityScanEngine(), "normal").detail == "normal"
+    with pytest.raises(ValueError, match="Unknown reconstruction detail"):
+        engines.with_detail(engines.RealityScanEngine(), "ultra")
+    # A backend with no such knob is asked and simply does not have one.
+    external = engines.ExternalEngine("tool {photos} {output}")
+    assert engines.with_detail(external, "high") is external
+
+
 def test_too_few_photos_is_refused_before_launching_anything(tmp_path):
     thin = tmp_path / "thin"
     thin.mkdir()

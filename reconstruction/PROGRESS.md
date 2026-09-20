@@ -55,7 +55,8 @@ reconstruction/.venv/bin/python reconstruction/pipeline.py build \
    project. There is no automatic timed continuation. Any other response cancels.
 
 Build loads the saved component and region without resetting the region or
-realigning. It creates a Normal-quality mesh, optionally simplifies, unwraps,
+realigning. It creates a High-quality mesh by default (`--detail normal` or
+`--detail preview` to trade detail for time), optionally simplifies, unwraps,
 textures, saves a finished project and exports `building.glb` into a fresh
 `exports/<run>/` folder. Review geometry and textures afterward; completion alone
 is not evidence of a good reconstruction.

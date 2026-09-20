@@ -403,6 +403,8 @@ def main():
     build.add_argument('--project', required=True)
     build.add_argument('--export-settings', default=str(Path(__file__).parent / 'presets/glb.xml'))
     build.add_argument('--triangles', type=int, help='Optional simplification target before unwrap and texturing')
+    build.add_argument('--detail', choices=('preview', 'normal', 'high'), default='high',
+                       help='RealityScan meshing quality (default: high)')
     for stage in (prepare, build):
         stage.add_argument('--realityscan', help='Override RealityScan executable path')
         stage.add_argument('--dry-run', action='store_true')
@@ -450,7 +452,8 @@ def main():
             desktop.prepare(args.photos, args.output, args.realityscan, args.dry_run)
         elif args.command == 'build':
             desktop = _desktop()
-            desktop.build(args.project, args.export_settings, args.triangles, args.realityscan, args.dry_run)
+            desktop.build(args.project, args.export_settings, args.triangles, args.realityscan,
+                          args.dry_run, args.detail)
         elif args.command == 'anchor':
             anchor_scan(args)
         elif args.command == 'orient':

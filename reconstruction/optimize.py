@@ -16,8 +16,8 @@ and `provenance.json` records that it was done and by how much.
 Geometry is not touched. Simplifying a mesh well needs a quadric decimator that
 is not in this project's dependencies, and a bad decimation of a photogrammetric
 surface looks like damage. RealityScan's own `-simplify` already caps the export
-at 400k triangles, which a browser renders without complaint; the texture was
-always the problem.
+(a million triangles by default — see `reconstruction.engine`), which a browser
+renders without complaint; the texture was always the problem.
 
     python -m reconstruction.optimize in.glb out.glb --max-texture 2048
 """
@@ -26,11 +26,15 @@ from __future__ import annotations
 
 import io
 import json
-import struct
 from pathlib import Path
 
-JSON_CHUNK = 0x4E4F534A
-BIN_CHUNK = 0x004E4942
+try:
+    from app.glb import NotGlb, read_glb, write_glb
+except ImportError:      # running the module from inside reconstruction/
+    import sys
+
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from app.glb import NotGlb, read_glb, write_glb
 
 # 2048 keeps facade detail legible at the distance the viewer frames a building
 # from, and costs 16 MB of video memory against the atlas's 256 MB.
@@ -42,48 +46,6 @@ MIN_SAVING_RATIO = 0.9
 
 class NotOptimizable(ValueError):
     """The GLB is structured in a way this rewriter will not touch safely."""
-
-
-def _read_glb(data: bytes) -> tuple[dict, bytes]:
-    if len(data) < 20 or data[:4] != b"glTF":
-        raise NotOptimizable("not a GLB file")
-    _, version, declared = struct.unpack("<4sII", data[:12])
-    if version != 2:
-        raise NotOptimizable(f"GLB version {version}, expected 2")
-    if declared != len(data):
-        raise NotOptimizable("declared length does not match the file size")
-
-    document: dict | None = None
-    binary = b""
-    offset = 12
-    while offset + 8 <= len(data):
-        length, kind = struct.unpack("<II", data[offset:offset + 8])
-        body = data[offset + 8:offset + 8 + length]
-        if kind == JSON_CHUNK:
-            document = json.loads(body)
-        elif kind == BIN_CHUNK:
-            binary = body
-        offset += 8 + length + (-length % 4)
-
-    if document is None:
-        raise NotOptimizable("GLB has no JSON chunk")
-    return document, binary
-
-
-def _write_glb(document: dict, binary: bytes) -> bytes:
-    text = json.dumps(document, separators=(",", ":")).encode()
-    text += b" " * (-len(text) % 4)
-    binary += b"\0" * (-len(binary) % 4)
-
-    total = 12 + 8 + len(text) + (8 + len(binary) if binary else 0)
-    out = io.BytesIO()
-    out.write(struct.pack("<4sII", b"glTF", 2, total))
-    out.write(struct.pack("<II", len(text), JSON_CHUNK))
-    out.write(text)
-    if binary:
-        out.write(struct.pack("<II", len(binary), BIN_CHUNK))
-        out.write(binary)
-    return out.getvalue()
 
 
 def _resample(raw: bytes, max_edge: int) -> tuple[bytes, str, tuple[int, int], tuple[int, int]] | None:
@@ -134,7 +96,10 @@ def web_model(source: Path | str, destination: Path | str, *,
     served whole than served broken.
     """
     source, destination = Path(source), Path(destination)
-    document, binary = _read_glb(source.read_bytes())
+    try:
+        document, binary = read_glb(source.read_bytes())
+    except NotGlb as exc:
+        raise NotOptimizable(str(exc)) from exc
 
     buffers = document.get("buffers") or []
     if any(b.get("uri") for b in buffers):
@@ -187,7 +152,7 @@ def web_model(source: Path | str, destination: Path | str, *,
     if buffers:
         buffers[0]["byteLength"] = len(rebuilt)
 
-    optimized = _write_glb(document, bytes(rebuilt))
+    optimized = write_glb(document, bytes(rebuilt))
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(optimized)
 

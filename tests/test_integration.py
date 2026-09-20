@@ -1,12 +1,14 @@
 import io
 import json
 import zipfile
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import export, main
+from app import export, glb as app_glb, main
+from app.assets import ASSET_DIR
 from app.geocode import Geocoder
 from app.main import app
 
@@ -73,6 +75,73 @@ def test_place_then_export_writes_real_files(client):
         assert doc["footprint"] == placement["footprint"]
         assert package.read(prefix + "building.glb")[:4] == b"glTF"
         assert json.loads(package.read(prefix + "manifest.json"))["exportId"] == manifest["exportId"]
+
+
+def test_the_exported_glb_is_the_size_the_editor_showed(client):
+    """The point of the placement editor is that a scan comes out of
+    photogrammetry in arbitrary units and a person fixes that. If the fix lives
+    only in placement.json, every consumer that just opens building.glb — an
+    engine importer, Blender, a glTF viewer — loads the building at the wrong
+    size and nothing tells them. So the scale is baked into the container.
+    """
+    import tempfile
+
+    import trimesh
+
+    placement = client.get("/api/session").json()["asset"]["placement"]
+    source = trimesh.load(ASSET_DIR / placement["assetId"] / "building.glb", force="mesh")
+
+    placement["transform"] = {**placement["transform"], "metersPerModelUnit": 2.5}
+    manifest = client.post("/api/export", json={"placement": placement}).json()
+
+    assert manifest["model"]["metersPerModelUnit"] == 1.0, manifest["model"]
+    assert manifest["model"]["bakedTransform"]["metersPerModelUnit"] == 2.5
+    expected = [round(v * 2.5, 3) for v in source.extents]
+    assert [manifest["model"]["dimensionsMeters"][k] for k in
+            ("widthMeters", "heightMeters", "lengthMeters")] == pytest.approx(expected, abs=0.01)
+
+    archive = client.get(manifest["downloadUrl"])
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as package:
+        prefix = placement["assetId"] + "/"
+        doc = json.loads(package.read(prefix + "placement.json"))
+        # The two statements must agree: a consumer that applies the declared
+        # transform and one that ignores it get the same building.
+        assert doc["transform"]["metersPerModelUnit"] == 1.0
+        assert doc["transform"]["upAxis"] == "Y"
+        assert doc["dimensions"]["heightMeters"] == pytest.approx(source.extents[1] * 2.5, abs=0.01)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary) / "building.glb"
+            out.write_bytes(package.read(prefix + "building.glb"))
+            assert trimesh.load(out, force="mesh").extents == pytest.approx(
+                source.extents * 2.5, rel=1e-4)
+
+            lod = Path(temporary) / "building-lod.glb"
+            lod.write_bytes(package.read(prefix + "building-lod.glb"))
+            # Same scale in both models, or the "LOD" is a different building.
+            assert trimesh.load(lod, force="mesh").extents[1] == pytest.approx(
+                source.extents[1] * 2.5, rel=1e-4)
+
+
+def test_every_exported_model_is_a_self_contained_glb(client):
+    """"Map-ready" includes "opens somewhere else". A GLB pointing at a texture
+    on the author's disk is not a deliverable."""
+    placement = client.get("/api/session").json()["asset"]["placement"]
+    manifest = client.post("/api/export", json={"placement": placement}).json()
+
+    assert manifest["model"]["format"] == "glb"
+    archive = client.get(manifest["downloadUrl"])
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as package:
+        prefix = placement["assetId"] + "/"
+        models = [n for n in package.namelist() if n.endswith(".glb")]
+        assert models
+        for name in models:
+            document, _ = app_glb.read_glb(package.read(name))
+            assert document.get("meshes"), name
+            for resource in (document.get("buffers") or []) + (document.get("images") or []):
+                uri = resource.get("uri") or ""
+                assert not uri or uri.startswith("data:"), f"{name} references {uri}"
+        assert prefix + "manifest.json" in package.namelist()
 
 
 def test_lod_is_generated_and_declared(client):

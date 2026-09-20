@@ -17,6 +17,21 @@ const STATUS_COLOR = {
   synthetic: "#a26cf0",
 };
 
+/* Scale spans four orders of magnitude on purpose. A photogrammetric scan has
+   no units of its own: the same stadium can come back at 0.02 m/unit or at 40,
+   depending on nothing the user controls. A linear 0.25-4 slider could not
+   reach either, which made a reconstruction unadjustable — so the slider
+   carries log10(scale) and the number box carries the value itself. */
+const SCALE_MIN = 0.001;
+const SCALE_MAX = 1000;
+const SLIDER_MIN = -2;                      // 0.01 m/unit
+const SLIDER_MAX = 2;                       // 100 m/unit
+
+const clampScale = (v) => Math.min(SCALE_MAX, Math.max(SCALE_MIN, v));
+const sliderToScale = (v) => Number((10 ** Number(v)).toPrecision(4));
+const scaleToSlider = (s) =>
+  Math.min(SLIDER_MAX, Math.max(SLIDER_MIN, Math.log10(clampScale(s))));
+
 const ERA_NOTES = [
   [0.02, "2026 — prepared footprint model with estimated height. Real photo reconstruction is not connected yet."],
   [0.35, "Early drift. Same geometry, same placement — only light, material and vegetation change."],
@@ -80,17 +95,15 @@ async function loadAsset() {
   try {
     // previewUrl is the resampled copy of the same geometry when the publish
     // step made one; the export still ships the full-resolution building.glb.
-    const stats = await viewer.setAsset({
-      modelUrl: previewUrl || modelUrl, placement, coverage,
-    });
-    badge3d(stats
-      ? `${stats.widthM.toFixed(0)} × ${stats.depthM.toFixed(0)} × ${stats.heightM.toFixed(0)} m` +
-        ` · ${stats.triangles.toLocaleString()} tri`
-      : "model loaded");
+    await viewer.setAsset({ modelUrl: previewUrl || modelUrl, placement, coverage });
+    badgeSize();
   } catch (err) {
     badge3d("model failed to load");
     toast(`The model did not load: ${err.message}`, "error");
   }
+
+  // Before the map, so the editor is usable even if the map never comes up.
+  syncTransformInputs(placement.transform);
 
   mapBadge("waiting for the map…");
   // If the map never comes up, the rest of the app still has to work — the 3D
@@ -110,7 +123,6 @@ async function loadAsset() {
     .catch(() => null);
   mapView.setAsset(placement, cells, geometry);
   mapView.flyToAsset();
-  syncTransformInputs(placement.transform);
 }
 
 /* ───────────────────────── user actions ───────────────────────── */
@@ -248,7 +260,9 @@ async function startReconstruction() {
     return;
   }
   try {
-    const { jobId } = await api.reconstruct({ batchId: state.batchId, address });
+    const { jobId } = await api.reconstruct({
+      batchId: state.batchId, address, detail: $("detail-select").value,
+    });
     update({ job: { id: jobId, status: "queued", progress: 0, stage: "queued", log: [] } }, "job");
     pollJob(jobId);
   } catch (err) {
@@ -320,14 +334,24 @@ function renderReconstruct(s) {
   $("job-log").textContent = (s.job.log || []).slice(-40).join("\n");
 }
 
-function editTransform(patch) {
+/**
+ * Apply a correction from the editor.
+ *
+ * `origin` is the id of the control the user is holding, which is left alone
+ * so the other controls can follow it without fighting the keystrokes. The
+ * viewer is moved before the store is updated, because `renderFacts` reads the
+ * building's size back out of the viewer and that size has to be the new one.
+ */
+function editTransform(patch, origin = "") {
   if (!state.placement) return;
   const transform = { ...state.placement.transform, ...patch };
   const placement = { ...state.placement, transform };
-  update({ placement }, "transform");
 
   viewer.applyTransform(transform);
   mapView.setTransform(transform);
+  syncTransformInputs(transform, origin);
+  badgeSize();
+  update({ placement }, "transform");
 
   clearTimeout(validateTimer);
   validateTimer = setTimeout(async () => {
@@ -336,6 +360,17 @@ function editTransform(patch) {
       update({ problems: result.problems, worldforgeUri: result.worldforgeUri }, "validated");
     } catch { /* validation is advisory; a failed check must not block editing */ }
   }, 320);
+}
+
+/** Solve the scale from a height the user knows, in metres. */
+function applyKnownHeight(metres) {
+  if (!Number.isFinite(metres) || metres <= 0) return;   // mid-typing, or cleared
+  const stats = viewer.stats();
+  if (!stats || !stats.unitHeight) {
+    toast("No model is measured yet, so a known height has nothing to scale.", "warn");
+    return;
+  }
+  editTransform({ metersPerModelUnit: clampScale(metres / stats.unitHeight) }, "real-height");
 }
 
 async function exportPackage() {
@@ -405,9 +440,31 @@ function bindControls() {
     placeAt(venue.lat, venue.lon, venue.address);
   });
 
-  $("heading").addEventListener("input", (e) => editTransform({ headingDegrees: Number(e.target.value) }));
-  $("scale").addEventListener("input", (e) => editTransform({ metersPerModelUnit: Number(e.target.value) }));
-  $("offset").addEventListener("input", (e) => editTransform({ verticalOffsetMeters: Number(e.target.value) }));
+  $("heading").addEventListener("input", (e) =>
+    editTransform({ headingDegrees: Number(e.target.value) }, "heading"));
+  $("heading-num").addEventListener("input", (e) => {
+    const degrees = Number(e.target.value);
+    if (Number.isFinite(degrees)) {
+      editTransform({ headingDegrees: ((degrees % 360) + 360) % 360 }, "heading-num");
+    }
+  });
+
+  $("scale").addEventListener("input", (e) =>
+    editTransform({ metersPerModelUnit: sliderToScale(e.target.value) }, "scale"));
+  $("scale-num").addEventListener("input", (e) => {
+    const scale = Number(e.target.value);
+    if (Number.isFinite(scale) && scale > 0) {
+      editTransform({ metersPerModelUnit: clampScale(scale) }, "scale-num");
+    }
+  });
+  $("real-height").addEventListener("input", (e) => applyKnownHeight(Number(e.target.value)));
+
+  $("offset").addEventListener("input", (e) =>
+    editTransform({ verticalOffsetMeters: Number(e.target.value) }, "offset"));
+  $("offset-num").addEventListener("input", (e) => {
+    const offset = Number(e.target.value);
+    if (Number.isFinite(offset)) editTransform({ verticalOffsetMeters: offset }, "offset-num");
+  });
 
   $("reset-transform").addEventListener("click", () =>
     editTransform({ headingDegrees: 0, metersPerModelUnit: 1, verticalOffsetMeters: 0 }));
@@ -632,28 +689,46 @@ function renderFacts(s) {
   if (!p) return;
   const d = p.dimensions || {};
   const t = p.transform || {};
+  const scale = Number(t.metersPerModelUnit ?? 1);
+
+  // Measured off the loaded mesh with the current scale applied, so the numbers
+  // track the sliders. The placement's own dimensions are the fallback for an
+  // asset whose model did not load — stale the moment the scale is touched,
+  // which is exactly why the measured value wins when there is one.
+  const live = viewer?.stats?.() || null;
+  const size = live || (d.widthMeters
+    ? { widthM: d.widthMeters, depthM: d.lengthMeters ?? 0, heightM: d.heightMeters ?? 0 }
+    : null);
+
   const rows = [
     ["Coordinates", `${p.location.latitude.toFixed(5)}, ${p.location.longitude.toFixed(5)}`],
     ["World Cell", p.spatialIndex?.cell || "—"],
     ["Parent cells", (p.spatialIndex?.parentCells || []).join(" ‹ ") || "—"],
     ["Ground elevation", `${(p.location.elevationMeters ?? 0).toFixed(1)} m`],
     ["Footprint", d.footprintAreaMeters2 ? `${Math.round(d.footprintAreaMeters2).toLocaleString()} m²` : "—"],
-    ["Extent", d.widthMeters ? `${d.widthMeters.toFixed(0)} × ${d.lengthMeters.toFixed(0)} m` : "—"],
-    ["Height", d.heightMeters ? `${d.heightMeters.toFixed(1)} m` : "—"],
+    ["Extent", size ? `${size.widthM.toFixed(1)} × ${size.depthM.toFixed(1)} m` : "—"],
+    ["Height", size ? `${size.heightM.toFixed(1)} m` : "—"],
     ["Anchor", `${t.anchor || "—"} · ${t.upAxis || "Y"}-up`],
   ];
   $("facts").replaceChildren(...rows.flatMap(([k, v]) => [el("dt", "", k), el("dd", "", v)]));
 
+  $("measured-size").textContent = live
+    ? `Exports as ${live.widthM.toFixed(1)} × ${live.depthM.toFixed(1)} × ` +
+      `${live.heightM.toFixed(1)} m — the scale is baked into building.glb.`
+    : "No model measured yet.";
+
   // A scale far from 1 means the model units are not metres — worth saying.
-  const scale = Number(t.metersPerModelUnit ?? 1);
   const hint = $("scale-hint");
-  if (Math.abs(scale - 1) > 0.02) {
+  if (Math.abs(scale - 1) > 0.002) {
     hint.className = "hint warn";
-    hint.textContent = `A ${scale.toFixed(2)} m/unit scale means the source model is not in metres. ` +
-                       `Height becomes ${((d.heightMeters || 0) * scale).toFixed(1)} m.`;
+    hint.textContent =
+      `The source model is not in metres. The export multiplies its geometry by ` +
+      `${scale} and writes metersPerModelUnit: 1, so the GLB in the package is ` +
+      `the size shown below.`;
   } else {
     hint.className = "hint";
-    hint.textContent = "Metres of real world per model unit.";
+    hint.textContent = "Metres of real world per model unit. The export writes the " +
+                       "GLB at this size.";
   }
 }
 
@@ -703,12 +778,22 @@ function renderProblems(problems) {
 function renderExport(manifest) {
   const host = $("export-result");
   host.hidden = false;
+
+  const model = manifest.model || {};
+  const size = model.dimensionsMeters;
+  const summary = el("div", "export-model",
+    size
+      ? `GLB · ${size.widthMeters} × ${size.lengthMeters} × ${size.heightMeters} m ` +
+        `· ${model.metersPerModelUnit} m/unit · ${model.upAxis}-up`
+      : `GLB · ${model.metersPerModelUnit ?? 1} m/unit · ${model.upAxis || "Y"}-up`);
+  if (model.note) summary.append(el("span", "why", model.note));
+
   const list = document.createElement("ul");
   for (const f of manifest.files) list.append(el("li", "", f));
   const link = document.createElement("a");
   link.href = manifest.downloadUrl;
   link.textContent = `Download ${manifest.assetId}.zip`;
-  host.replaceChildren(el("code", "uri", manifest.worldforgeUri), list, link);
+  host.replaceChildren(el("code", "uri", manifest.worldforgeUri), summary, list, link);
 }
 
 function renderLegend() {
@@ -747,24 +832,41 @@ function frag(html) {
 function badge3d(text) { $("three-badge").textContent = text; }
 function mapBadge(text) { $("map-badge").textContent = text; }
 
-function syncTransformInputs(transform = {}) {
-  $("heading").value = transform.headingDegrees ?? 0;
-  $("scale").value = transform.metersPerModelUnit ?? 1;
-  $("offset").value = transform.verticalOffsetMeters ?? 0;
-  $("heading-out").textContent = `${Math.round(transform.headingDegrees ?? 0)}°`;
-  $("scale-out").textContent = `${(transform.metersPerModelUnit ?? 1).toFixed(2)} m / unit`;
-  $("offset-out").textContent = `${(transform.verticalOffsetMeters ?? 0).toFixed(1)} m`;
+/**
+ * Put the transform back into every control, except the one being typed in.
+ *
+ * Writing a value into the field the user is editing moves their cursor and
+ * eats digits — "12" becomes "1" the moment the first keystroke round-trips —
+ * so `skip` names that control and it is left alone.
+ */
+function syncTransformInputs(transform = {}, skip = "") {
+  const heading = Number(transform.headingDegrees ?? 0);
+  const scale = Number(transform.metersPerModelUnit ?? 1);
+  const offset = Number(transform.verticalOffsetMeters ?? 0);
+
+  const set = (id, value) => { if (id !== skip) $(id).value = value; };
+  set("heading", Math.round(heading));
+  set("heading-num", Number(heading.toFixed(1)));
+  set("scale", scaleToSlider(scale).toFixed(3));
+  set("scale-num", Number(scale.toPrecision(4)));
+  set("offset", Math.min(50, Math.max(-50, offset)).toFixed(1));
+  set("offset-num", Number(offset.toFixed(2)));
+
+  // The known-height box is the same control from the other end: it reads the
+  // building's current height so the user can correct it rather than guess.
+  const stats = viewer?.stats?.();
+  if (stats && skip !== "real-height") {
+    $("real-height").value = Number(stats.heightM.toFixed(1));
+  }
 }
 
-// Keep the readouts live while dragging, without a store round trip per pixel.
-for (const [id, format] of [
-  ["heading", (v) => `${Math.round(v)}°`],
-  ["scale", (v) => `${Number(v).toFixed(2)} m / unit`],
-  ["offset", (v) => `${Number(v).toFixed(1)} m`],
-]) {
-  document.addEventListener("input", (e) => {
-    if (e.target.id === id) $(`${id}-out`).textContent = format(e.target.value);
-  });
+/** The 3D badge: what the building measures now, and how heavy it is. */
+function badgeSize() {
+  const stats = viewer?.stats?.();
+  badge3d(stats
+    ? `${stats.widthM.toFixed(0)} × ${stats.depthM.toFixed(0)} × ${stats.heightM.toFixed(0)} m` +
+      ` · ${stats.triangles.toLocaleString()} tri`
+    : "model loaded");
 }
 
 /* Nothing in a demo is worse than a blank panel and a silent console. Anything

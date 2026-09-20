@@ -13,9 +13,19 @@ Each export is an immutable snapshot under its own `exportId`, so a download
 link handed to someone keeps resolving to the bytes they were shown after the
 placement is edited again.
 
-The GLB stays canonical: heading, scale and vertical offset live in
-placement.json rather than being baked into the geometry, so a correction made
-in the editor is reversible and auditable instead of destructive.
+The exported GLB is metres. Whatever scale the user settled on in the
+placement editor is baked into the model as a glTF node transform before it is
+written, and `placement.json` then declares `metersPerModelUnit: 1`. A consumer
+that drops `building.glb` straight into an engine gets a building the size it
+was on screen, and a consumer that reads the transform gets the same answer.
+The declared up axis is normalised to glTF's Y the same way.
+
+Baking a node transform is not the same as rewriting vertices: the accessor
+data is byte-identical to the reconstruction's own output, the factor applied
+is recorded in the manifest and in provenance, and dividing it back out
+restores the original model exactly. Heading and vertical offset are *not*
+baked — they place the building in the world rather than describe its size, and
+they stay in placement.json where a map consumer expects them.
 
 Packaging is staged in a temporary directory and renamed into place, and it
 refuses to overwrite an existing package. A half-written export that looks
@@ -35,7 +45,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app import geohash
+from app import geohash, glb
 from app.assets import ASSET_DIR, extrude_footprint, write_glb
 from app.contracts import Placement, validate_document, validate_placement
 
@@ -97,16 +107,34 @@ def build_lod(placement: Placement, dest: Path, source: Path | None = None) -> s
     return "building-lod.glb"
 
 
-def check_glb(path: Path) -> None:
-    """Header-level sanity check. Not a full glTF validation, and not a render."""
+def check_glb(path: Path) -> dict:
+    """Gate the container. Not a full glTF validation, and not a render.
+
+    Every model in the package goes through this: GLB v2 with a declared length
+    that matches the file, at least one mesh, and no external buffers or images.
+    A package whose model pulls a texture off the author's disk is not portable,
+    which is most of what "map-ready" means.
+    """
     path = Path(path)
-    with path.open("rb") as stream:
-        header = stream.read(12)
-    if len(header) != 12:
+    data = path.read_bytes()
+    if len(data) < 20:
         raise ValueError(f"{path.name}: GLB header is incomplete")
-    magic, version, length = struct.unpack("<4sII", header)
-    if magic != b"glTF" or version != 2 or length != path.stat().st_size or length < 20:
+    magic, version, length = struct.unpack("<4sII", data[:12])
+    if magic != b"glTF" or version != 2 or length != len(data):
         raise ValueError(f"{path.name}: expected a GLB v2 file with a matching declared length")
+
+    try:
+        document, _ = glb.read_glb(data)
+    except glb.NotGlb as exc:
+        raise ValueError(f"{path.name}: {exc}") from exc
+    if not document.get("meshes"):
+        raise ValueError(f"{path.name}: the GLB carries no meshes")
+    for resource in (document.get("buffers") or []) + (document.get("images") or []):
+        uri = resource.get("uri") or ""
+        if uri and not uri.startswith("data:"):
+            raise ValueError(f"{path.name}: references {uri!r} outside the file; "
+                             f"export with embedded textures and buffers")
+    return document
 
 
 def check_webp(path: Path) -> None:
@@ -114,6 +142,84 @@ def check_webp(path: Path) -> None:
         header = stream.read(12)
     if len(header) != 12 or header[:4] != b"RIFF" or header[8:12] != b"WEBP":
         raise ValueError(f"{Path(path).name}: thumbnail must be a WebP file")
+
+
+def bake_placement_scale(stage: Path, models: list[str], placement: Placement) -> dict:
+    """Bake the editor's scale (and any Z-up frame) into the staged models.
+
+    Every model in the package gets the *same* factor, so the low-detail copy
+    is still the same building as the high-detail one. Returns what was applied
+    and what the package now measures, in metres.
+
+    A failure here is not fatal: the un-baked model is already staged and is a
+    correct export as long as `placement.json` keeps saying what scale it needs.
+    The report carries the reason so the manifest can say so out loud instead of
+    shipping a model that is silently the wrong size.
+    """
+    transform = placement.transform
+    result: dict = {
+        "applied": None,
+        "metersPerModelUnit": transform.metersPerModelUnit,
+        "upAxis": transform.upAxis,
+        "extentsModelUnits": None,
+        "dimensionsMeters": None,
+        "boundingBoxMeters": None,
+        "note": "",
+    }
+
+    # Bake beside each model and only move the results into place once every
+    # one of them succeeded. A package where the high model is metres and the
+    # low model is model units is worse than one that is honestly un-baked.
+    baked: list[tuple[Path, Path]] = []
+    pending: Path | None = None
+    try:
+        for name in models:
+            source = stage / name
+            pending = stage / f"{name}.baking"
+            report = glb.bake_file(source, pending,
+                                   scale=transform.metersPerModelUnit,
+                                   up_axis=transform.upAxis)
+            check_glb(pending)
+            baked.append((pending, source))
+            pending = None
+            if name == "building.glb":
+                result["applied"] = report["applied"]
+                result["extentsModelUnits"] = report["extentsModelUnits"]
+    except (ValueError, OSError) as exc:
+        log.warning("could not bake the placement scale (%s); exporting in model units", exc)
+        result["note"] = (f"The model could not be rewritten in metres ({exc}), so "
+                          f"building.glb is in model units and placement.json keeps "
+                          f"metersPerModelUnit {transform.metersPerModelUnit:g}.")
+        for done, _ in baked:
+            done.unlink(missing_ok=True)
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+        return result
+
+    for pending, final in baked:
+        pending.replace(final)
+
+    if result["applied"] is not None:
+        result["metersPerModelUnit"] = 1.0
+        result["upAxis"] = "Y"
+        result["note"] = (
+            f"Scale {transform.metersPerModelUnit:g} m/unit"
+            + (f" and the {transform.upAxis}-up frame" if transform.upAxis != "Y" else "")
+            + " baked into the GLB as a node transform; the export is metres, Y-up."
+        )
+
+    box = glb.scene_bounds(glb.read_glb((stage / "building.glb").read_bytes())[0])
+    if box is not None:
+        low, high = box
+        result["boundingBoxMeters"] = {"min": [round(v, 4) for v in low],
+                                       "max": [round(v, 4) for v in high]}
+        # glTF Y-up: X is width, Y is height, Z is length.
+        result["dimensionsMeters"] = {
+            "widthMeters": round(high[0] - low[0], 3),
+            "heightMeters": round(high[1] - low[1], 3),
+            "lengthMeters": round(high[2] - low[2], 3),
+        }
+    return result
 
 
 def package(placement: Placement, *, provenance: dict, coverage: dict,
@@ -165,11 +271,32 @@ def package(placement: Placement, *, provenance: dict, coverage: dict,
             update={"models": placement.models.model_copy(update=models)}
         )
 
+        # The size on screen is the size in the box. Everything after this point
+        # describes the baked models, not the ones the editor was working on.
+        bake = bake_placement_scale(stage, [n for n in written if n.endswith(".glb")],
+                                    placement)
+        placement = placement.model_copy(update={
+            "transform": placement.transform.model_copy(update={
+                "metersPerModelUnit": bake["metersPerModelUnit"],
+                "upAxis": bake["upAxis"],
+            }),
+        })
+        if bake["dimensionsMeters"]:
+            # Measured off the exported bytes, so a scale the user changed after
+            # the reconstruction cannot leave a stale dimension behind.
+            placement = placement.model_copy(update={
+                "dimensions": placement.dimensions.model_copy(
+                    update=bake["dimensionsMeters"]),
+            })
+
         placement_doc = placement.model_dump(exclude_none=False)
         placement_doc["era"] = era
         placement_doc["exportedAt"] = stamp
+        if bake["boundingBoxMeters"]:
+            placement_doc["boundingBoxMeters"] = bake["boundingBoxMeters"]
 
-        provenance_doc = {**provenance, "schemaVersion": 1, "generatedAt": stamp}
+        provenance_doc = {**provenance, "schemaVersion": 1, "generatedAt": stamp,
+                          "exportTransform": bake}
         if era == "2426":
             provenance_doc["eraTreatment"] = (
                 "Scorched Nebraska presentation. The 2426 appearance is a rendering "
@@ -178,12 +305,23 @@ def package(placement: Placement, *, provenance: dict, coverage: dict,
             )
 
         problems = validate_placement(placement)
+        if bake["applied"] is None and bake["note"]:
+            problems = [*problems, bake["note"]]
         manifest = {
             "assetId": placement.assetId,
             "exportId": export_id,
             "era": era,
             "files": sorted(written + ["placement.json", "provenance.json",
                                        "coverage.json", "manifest.json"]),
+            "model": {
+                "format": "glb",
+                "upAxis": placement.transform.upAxis,
+                "metersPerModelUnit": placement.transform.metersPerModelUnit,
+                "dimensionsMeters": bake["dimensionsMeters"],
+                "boundingBoxMeters": bake["boundingBoxMeters"],
+                "bakedTransform": bake["applied"],
+                "note": bake["note"],
+            },
             "cell": placement.spatialIndex.cell if placement.spatialIndex else "",
             "worldforgeUri": world_uri(placement, era),
             "exportPath": str(dest.relative_to(REPO)) if dest.is_relative_to(REPO) else str(dest),

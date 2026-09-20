@@ -63,6 +63,13 @@
       <div class="intake" id="intake" hidden></div>
 
       <div class="reconstruct" id="reconstruct-panel" hidden>
+        <label class="detail-choice" for="detail-select">Mesh detail
+          <select id="detail-select">
+            <option value="high" selected>High — full-resolution depth maps</option>
+            <option value="normal">Normal — half resolution, quicker</option>
+            <option value="preview">Preview — rough, proves alignment</option>
+          </select>
+        </label>
         <button type="button" id="reconstruct-btn">Reconstruct this building</button>
         <p class="hint" id="reconstruct-hint"></p>
         <div class="job" id="job" hidden>
@@ -105,7 +112,11 @@
       <div class="control">
         <div class="control-head">
           <label for="heading">Heading</label>
-          <output id="heading-out">0°</output>
+          <span class="num-field">
+            <input type="number" id="heading-num" min="0" max="360" step="0.5" value="0"
+                   aria-label="Heading in degrees clockwise from true north">
+            <span class="unit">°</span>
+          </span>
         </div>
         <input type="range" id="heading" min="0" max="359" step="1" value="0">
         <p class="hint">Rotation of the model clockwise from true north.</p>
@@ -114,18 +125,38 @@
       <div class="control">
         <div class="control-head">
           <label for="scale">Scale</label>
-          <output id="scale-out">1.00 m / unit</output>
+          <span class="num-field">
+            <input type="number" id="scale-num" min="0.001" max="1000" step="0.01" value="1"
+                   aria-label="Metres of real world per model unit">
+            <span class="unit">m/unit</span>
+          </span>
         </div>
-        <input type="range" id="scale" min="0.25" max="4" step="0.01" value="1">
+        <input type="range" id="scale" min="-2" max="2" step="0.002" value="0">
         <p class="hint" id="scale-hint">Metres of real world per model unit.</p>
+
+        <div class="control-head control-head--sub">
+          <label for="real-height">Known height</label>
+          <span class="num-field">
+            <input type="number" id="real-height" min="0.5" max="900" step="0.5"
+                   placeholder="—" aria-label="Real building height in metres">
+            <span class="unit">m</span>
+          </span>
+        </div>
+        <p class="hint">A photogrammetric scan has no units of its own. Type the
+           building's real height and the scale is solved from it.</p>
+        <p class="hint measured" id="measured-size">—</p>
       </div>
 
       <div class="control">
         <div class="control-head">
           <label for="offset">Ground offset</label>
-          <output id="offset-out">0.0 m</output>
+          <span class="num-field">
+            <input type="number" id="offset-num" min="-200" max="200" step="0.1" value="0"
+                   aria-label="Vertical offset in metres">
+            <span class="unit">m</span>
+          </span>
         </div>
-        <input type="range" id="offset" min="-25" max="25" step="0.1" value="0">
+        <input type="range" id="offset" min="-50" max="50" step="0.1" value="0">
         <p class="hint">Positive lifts the model; negative sinks it.</p>
       </div>
 

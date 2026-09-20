@@ -4,7 +4,13 @@ Two are available.
 
 **RealityScan** drives the Epic desktop application through its command line.
 It is the good one, and it is Windows-only; under WSL the calls are translated
-with `wslpath`. The interactive CLI in `pipeline.py` deliberately stops between
+with `wslpath`. It meshes at the highest detail RealityScan offers
+(`-calculateHighModel`, full-resolution depth maps) and keeps a million
+triangles, because the whole point of photogrammetry here is measured detail;
+`WORLDFORGE_RECONSTRUCTION_DETAIL` and `WORLDFORGE_RECONSTRUCTION_TRIANGLES`
+dial that back on a machine that cannot afford it.
+
+The interactive CLI in `pipeline.py` deliberately stops between
 alignment and meshing so a human can place the reconstruction region by hand.
 The web app cannot stop for that, so it runs unattended with
 `-setReconstructionRegionAuto` and records `regionMode: "automatic"` in
@@ -54,6 +60,51 @@ MIN_PHOTOS = 8
 # A reconstruction that has not written its progress file in this long is
 # assumed wedged. Meshing a large capture is slow, so this is generous.
 STALL_TIMEOUT_S = float(os.environ.get('WORLDFORGE_RECONSTRUCTION_STALL_S', '1800'))
+
+# The meshing qualities live in `desktop`, next to the other RealityScan
+# vocabulary; both the unattended path here and the interactive CLI use them.
+# High is the default because a low-detail mesh of a real building is
+# indistinguishable from a box, and a box is what the prepared asset already is.
+DETAIL_COMMANDS = desktop.DETAIL_COMMANDS
+DEFAULT_DETAIL = (os.environ.get('WORLDFORGE_RECONSTRUCTION_DETAIL', '').strip().lower()
+                  or desktop.DEFAULT_DETAIL)
+
+# Triangles kept after meshing. RealityScan's raw high-detail mesh is tens of
+# millions of triangles — far past what a browser, a game engine or trimesh
+# will enjoy — so it is decimated once, before unwrapping, while the decimator
+# still has the full surface to work from. Set the variable to 0 to keep
+# everything RealityScan produced.
+DEFAULT_TRIANGLES = 1_000_000
+
+
+def default_triangles():
+    """The triangle budget, from the environment when it is set there."""
+    raw = os.environ.get('WORLDFORGE_RECONSTRUCTION_TRIANGLES', '').strip()
+    if not raw:
+        return DEFAULT_TRIANGLES
+    try:
+        value = int(float(raw))
+    except ValueError:
+        return DEFAULT_TRIANGLES
+    return value if value > 0 else None      # 0 or negative: do not simplify
+
+
+def detail_command(detail=None):
+    """The meshing command for a detail level, defaulting from the environment."""
+    return desktop.mesh_command(detail or DEFAULT_DETAIL)
+
+
+def with_detail(engine, detail):
+    """Return `engine` set to a requested detail level, or itself if it has none.
+
+    The external command backend has no say in how its tool meshes, so asking
+    it for high detail is not an error — it is simply not something this app
+    controls, and the provenance records what actually ran.
+    """
+    if not detail or not hasattr(engine, 'detail'):
+        return engine
+    _, engine.detail = desktop.mesh_command(detail)
+    return engine
 
 
 @dataclass
@@ -112,12 +163,14 @@ def needs_staging(path):
 # RealityScan
 # ---------------------------------------------------------------------------
 
-def oneshot_commands(photos, output, preset, triangles=None):
+def oneshot_commands(photos, output, preset, triangles=None, detail=None):
     """Align, auto-region, mesh, unwrap, texture and export without stopping.
 
     The interactive path in `pipeline.py` is still the one to use when quality
-    matters; this exists so the web app can run at all.
+    matters — a hand-placed reconstruction region beats an automatic one — but
+    the mesh itself is calculated at the same detail either way.
     """
+    mesh_command, _ = detail_command(detail)
     commands = [
         '-newScene',
         '-set', 'appIncSubdirs=true',
@@ -125,8 +178,9 @@ def oneshot_commands(photos, output, preset, triangles=None):
         '-align',
         '-selectMaximalComponent',
         '-setReconstructionRegionAuto',
-        '-calculateNormalModel',
+        mesh_command,
     ]
+    # Before the unwrap, so the texture is laid out for the mesh that ships.
     if triangles is not None:
         commands += ['-simplify', str(triangles)]
     return commands + [
@@ -150,10 +204,13 @@ class RealityScanEngine:
     makes is taken along the up axis; anchoring a Z-up scan as Y-up laid a
     stadium on its side and called the result a 38-metre-tall slab."""
 
-    def __init__(self, executable=None, preset=None, triangles=400_000):
+    def __init__(self, executable=None, preset=None, triangles=-1, detail=None):
         self.executable = executable
         self.preset = Path(preset) if preset else Path(__file__).parent / 'presets/glb.xml'
-        self.triangles = triangles
+        # -1 rather than None as the "unset" marker: None is a real value here
+        # and means "keep every triangle RealityScan produced".
+        self.triangles = default_triangles() if triangles == -1 else triangles
+        _, self.detail = detail_command(detail)
 
     def status(self):
         try:
@@ -167,10 +224,13 @@ class RealityScanEngine:
             return EngineStatus(self.name, False,
                                 'RealityScan is a Windows application and this machine '
                                 'has no WSL interop to launch it with.', str(found))
+        budget = (f'{self.triangles:,} triangles' if self.triangles
+                  else 'every triangle it produces')
         return EngineStatus(
             self.name, True,
-            'Runs unattended with an automatic reconstruction region. For a '
-            'hand-placed region, use the prepare/build commands in the CLI.',
+            f'Meshes at {self.detail} detail and keeps {budget}. Runs unattended '
+            f'with an automatic reconstruction region; for a hand-placed region, '
+            f'use the prepare/build commands in the CLI.',
             str(found),
         )
 
@@ -203,7 +263,8 @@ class RealityScanEngine:
                 source = staged / 'photos'
 
         try:
-            commands = oneshot_commands(source, output, self.preset, self.triangles)
+            commands = oneshot_commands(source, output, self.preset,
+                                        self.triangles, self.detail)
             _execute(executable, commands, output, progress)
         finally:
             if staged is not None:

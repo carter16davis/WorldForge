@@ -27,6 +27,20 @@ class DesktopTests(unittest.TestCase):
             self.assertLess(build.index('-unwrap'), build.index('-calculateTexture'))
             self.assertNotIn('-simplify', desktop.build_commands(Path('p'), Path('o'), Path('s')))
 
+    def test_mesh_detail(self):
+        with patch.object(desktop, 'desktop_path', side_effect=str):
+            # High detail meshes from the photographs at full resolution. It is
+            # the default in both the CLI and the web app: anything less throws
+            # away the facade detail the capture exists to record.
+            self.assertIn('-calculateHighModel', desktop.build_commands(Path('p'), Path('o'), Path('s')))
+            self.assertIn('-calculateNormalModel',
+                          desktop.build_commands(Path('p'), Path('o'), Path('s'), None, 'normal'))
+            self.assertIn('-calculatePreviewModel',
+                          desktop.build_commands(Path('p'), Path('o'), Path('s'), None, 'PREVIEW'))
+        self.assertEqual(desktop.mesh_command('high'), ('-calculateHighModel', 'high'))
+        with self.assertRaises(ValueError):
+            desktop.mesh_command('ultra')
+
     def test_glb_embedded_and_external_textures(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

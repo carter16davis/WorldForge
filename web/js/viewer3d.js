@@ -231,7 +231,7 @@ export class Viewer {
         // RealityScan exports no normals, so they have to be computed either
         // way. On indexed geometry they come out smooth, which is what a
         // measured surface should look like — and it avoids tripling a
-        // 400,000-triangle mesh to get the faceting the demo box wants.
+        // million-triangle mesh to get the faceting the demo box wants.
         if (!obj.geometry.attributes.normal) obj.geometry.computeVertexNormals();
       } else {
         obj.geometry = obj.geometry.toNonIndexed();
@@ -250,6 +250,7 @@ export class Viewer {
 
     this.frameFix.add(root);
     this.applyTransform(placement.transform);
+    this._measureModel();
     this._buildScatter(placement);
     this._applyEra(this.era);
     this.setCoverageShading(this.coverageShading);
@@ -554,10 +555,33 @@ export class Viewer {
     this.controls.update();
   }
 
-  stats() {
-    const box = new THREE.Box3().setFromObject(this.building);
-    if (box.isEmpty()) return null;
-    const size = box.getSize(new THREE.Vector3());
+  /**
+   * Measure the mesh in its own model units, once per asset.
+   *
+   * With the placement transform lifted off first: `Box3.setFromObject` walks
+   * world matrices, so measuring through the live transform would fold scale
+   * into the number and fold heading into it as the AABB of a rotated box.
+   * What the editor needs is the building's own width, depth and height, which
+   * is a property of the mesh and does not change while a slider moves.
+   */
+  _measureModel() {
+    const group = this.building;
+    const scale = group.scale.clone();
+    const heading = group.rotation.y;
+    const lift = group.position.y;
+
+    group.scale.set(1, 1, 1);
+    group.rotation.y = 0;
+    group.position.y = 0;
+    group.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(this.frameFix);
+    this.modelSize = box.isEmpty() ? null : box.getSize(new THREE.Vector3());
+
+    group.scale.copy(scale);
+    group.rotation.y = heading;
+    group.position.y = lift;
+    group.updateMatrixWorld(true);
+
     let triangles = 0;
     for (const mesh of this.meshes || []) {
       // Indexed geometry is kept for textured scans, where the position count
@@ -565,15 +589,38 @@ export class Viewer {
       const geo = mesh.geometry;
       triangles += (geo.index ? geo.index.count : geo.attributes.position.count) / 3;
     }
+    this.triangleCount = Math.round(triangles);
+  }
+
+  /**
+   * What the building measures right now, in metres.
+   *
+   * This is the number the export writes: `app.export` bakes
+   * metersPerModelUnit into the GLB, so the size reported here is the size of
+   * the model in the downloaded package.
+   */
+  stats() {
+    if (!this.modelSize) return null;
+    const scale = this.building.scale.x || 1;
     return {
-      widthM: size.x, heightM: size.y, depthM: size.z,
-      triangles: Math.round(triangles),
+      widthM: this.modelSize.x * scale,
+      heightM: this.modelSize.y * scale,
+      depthM: this.modelSize.z * scale,
+      unitWidth: this.modelSize.x,
+      unitHeight: this.modelSize.y,
+      unitDepth: this.modelSize.z,
+      metersPerModelUnit: scale,
+      triangles: this.triangleCount || 0,
     };
   }
 
   /* ───────────────────────────── plumbing ───────────────────────────── */
 
   _clear(group) {
+    if (group === this.frameFix) {
+      this.modelSize = null;
+      this.triangleCount = 0;
+    }
     for (const child of [...group.children]) {
       group.remove(child);
       child.traverse?.((o) => {

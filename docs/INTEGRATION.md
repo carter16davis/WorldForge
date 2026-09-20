@@ -37,6 +37,35 @@ it unconverted.
 Extension fields (`footprint`, `holes`, `dimensions`, `appearance`) are optional
 everywhere. A consumer that ignores them still gets a valid map-ready placement.
 
+### What the exported placement says
+
+Inside the app the transform is live: `metersPerModelUnit` is whatever the user
+has dialled in, and `upAxis` is whatever the producer declared. **The export
+normalises both.** `app.export.bake_placement_scale` applies the scale and any
+Z-up correction to every GLB in the package as a glTF node transform, and the
+`placement.json` that ships beside them therefore reads:
+
+```json
+"transform": { "headingDegrees": 87, "metersPerModelUnit": 1,
+               "verticalOffsetMeters": -2.5, "anchor": "ground-center",
+               "upAxis": "Y" }
+```
+
+Three consequences for a consumer:
+
+- Loading `building.glb` and ignoring the JSON entirely gives a building in
+  metres, upright, at the size the editor showed.
+- `dimensions` and `boundingBoxMeters` in the exported placement are measured
+  off those bytes, not carried over from the reconstruction.
+- Heading and vertical offset are still the consumer's job. They position the
+  building; they do not describe it.
+
+`manifest.json`'s `model` block names the factor that was baked
+(`bakedTransform`), and `provenance.json` repeats it under `exportTransform`.
+When a model cannot be rewritten, the package exports un-baked with the scale
+left in `placement.json` and the reason in the manifest's `problems` — it never
+ships a model whose size is a guess.
+
 ## What the web app probes for
 
 `app.pipeline` imports the `reconstruction` package at call time and looks for
@@ -179,6 +208,14 @@ Environment:
 | `WORLDFORGE_RECONSTRUCTION_CMD` | external engine command template |
 | `WORLDFORGE_WIN_WORK_ROOT` | where to stage photos so Windows sees a drive path, not a UNC path |
 | `WORLDFORGE_RECONSTRUCTION_STALL_S` | kill a run that reports no progress for this long (default 1800) |
+| `WORLDFORGE_RECONSTRUCTION_DETAIL` | RealityScan meshing quality: `high` (default), `normal`, `preview` |
+| `WORLDFORGE_RECONSTRUCTION_TRIANGLES` | triangles kept after meshing (default 1,000,000; `0` keeps every one) |
+
+`POST /api/reconstruct` takes `detail` per job, and `engine.with_detail(engine,
+detail)` is what applies it — a backend with no such knob, like the external
+command, is returned unchanged rather than refused. The meshing commands
+themselves live in `reconstruction/desktop.py` (`mesh_command`), so the
+unattended path and the interactive CLI cannot drift apart.
 
 ### `anchor_model`
 
@@ -210,7 +247,7 @@ whether the dimensions are in metres or in arbitrary model units.
 .venv/bin/python -m reconstruction.pipeline intake  --photos IN --output work/intake --license-notes "..."
 .venv/bin/python -m reconstruction.pipeline orient  --photos IN --output work/upright
 .venv/bin/python -m reconstruction.pipeline prepare --photos work/upright
-.venv/bin/python -m reconstruction.pipeline build   --project work/scans/<run>/aligned.rsproj
+.venv/bin/python -m reconstruction.pipeline build   --project work/scans/<run>/aligned.rsproj --detail high
 .venv/bin/python -m reconstruction.pipeline anchor  --model exports/<run>/building.glb \
     --output work/anchored --asset-id venue-001 \
     --latitude 40.8135 --longitude -74.0745 \
